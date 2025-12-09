@@ -33,33 +33,50 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
     float timeline_width = width - 2 * margin;
     float y = tl_state.timeline_y;
 
-    // Grid parameters
-    int grid_height = 6;  // 6 tiles high
-    // Calculate tile size to fit in available space below y position
+    // --- Grid Parameters ---
+    int grid_height = 6;
     float available_height = height - y - margin;
     float tile_size = available_height / grid_height;
-
-    // Adjust grid width to maintain square tiles
-    int grid_width = (int)(timeline_width / tile_size);
-
-    // Calculate actual timeline dimensions
     float timeline_height = grid_height * tile_size;
     tl_state.timeline_height = timeline_height;
 
-    // Draw grey grid
+    // The maximum frame count (N)
+    int total_frames = tl_state.total_frames;
+    if (total_frames <= 1) {
+        // Draw a simple line for minimal frames and exit
+        nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255));
+        nvgStrokeWidth(vg, 2.0f);
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, margin, y);
+        nvgLineTo(vg, margin + timeline_width, y);
+        nvgStroke(vg);
+        return;
+    } 
+
+    // Pre-calculate the log of the total number of frames (max recency)
+    float log_max_recency = log10f((float)total_frames);
+
+    // Lambda to get the x-coordinate for a given frame index (RECENCY-BASED logarithmic scale)
+    auto get_x_pos = [&](int frame_index) -> float {
+        // 1. Calculate Recency (Delta t): Time elapsed since this frame
+        int recency_dt = total_frames - frame_index + 1;
+        if (recency_dt < 1) recency_dt = 1; 
+
+        // 2. Calculate normalized logarithmic recency
+        float normalized_log_recency = log10f((float)recency_dt) / log_max_recency;
+        
+        // 3. Invert the result to prioritize the present (right side)
+        // Log(1) is 0, so 1 - 0 puts the present frame on the far right (x=timeline_width)
+        float normalized_x = 1.0f - normalized_log_recency;
+        
+        return margin + normalized_x * timeline_width;
+    };
+
+    // ----------------------------------------------------------------------
+    // --- Draw Horizontal Grid (Remains Linear) ----------------------------
+    // ----------------------------------------------------------------------
     nvgStrokeColor(vg, nvgRGBA(60, 60, 60, 255));
     nvgStrokeWidth(vg, 1);
-
-    // Vertical grid lines
-    for (int i = 0; i <= grid_width; i++) {
-        float x = margin + i * tile_size;
-        nvgBeginPath(vg);
-        nvgMoveTo(vg, x, y);
-        nvgLineTo(vg, x, y + grid_height * tile_size);
-        nvgStroke(vg);
-    }
-
-    // Horizontal grid lines
     for (int i = 0; i <= grid_height; i++) {
         float grid_y = y + i * tile_size;
         nvgBeginPath(vg);
@@ -68,7 +85,97 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
         nvgStroke(vg);
     }
 
-    // Draw white horizontal line vertically centered (at row 3 out of 6)
+    // ----------------------------------------------------------------------
+    // --- Draw Logarithmic Vertical Grid (Recency-Based) -------------------
+    // ----------------------------------------------------------------------
+
+    // Use recency (dt) as the loop counter to plot powers of 10 from the right (present).
+    int recency_dt = 1; 
+
+    while (true) {
+        
+        // Find the frame index corresponding to the current major recency (1, 10, 100, 1000...)
+        int major_tick_frame = total_frames - recency_dt + 1;
+        
+        // Exit loop if the major tick is beyond the start of the timeline (Frame 1)
+        if (major_tick_frame < 1 && recency_dt > total_frames) break;
+        
+        // --- Draw Major Ticks ---
+        // These mark time that is 1 frame ago, 10 frames ago, 100 frames ago, etc.
+        if (major_tick_frame >= 1) {
+            nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255)); // Darker
+            nvgStrokeWidth(vg, 1.5f);
+            
+            float major_x = get_x_pos(major_tick_frame);
+            
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, major_x, y);
+            nvgLineTo(vg, major_x, y + timeline_height);
+            nvgStroke(vg);
+            
+            // Draw the Recency Label (e.g., "100 dt" or "Frame 9901")
+            char label[32];
+            snprintf(label, sizeof(label), "%d", major_tick_frame);
+            nvgFontSize(vg, 12.0f);
+            nvgFillColor(vg, nvgRGBA(200, 200, 200, 255));
+            // Adjust label position slightly if near the edge
+            float label_x = (major_x > width - margin - 10) ? major_x - 10 : major_x; 
+            nvgText(vg, label_x, y - 5, label, NULL);
+        }
+        
+        // --- Draw Minor Ticks ---
+        // Only draw minor ticks if we haven't reached the full extent of the timeline
+        if (recency_dt * 10 <= total_frames || major_tick_frame > 1) {
+            
+            nvgStrokeColor(vg, nvgRGBA(60, 60, 60, 255)); // Lighter/Default
+            nvgStrokeWidth(vg, 1.0f);
+            
+            // Loop for minor recencies (2*dt, 3*dt, ... 9*dt)
+            for (int j = 2; j <= 9; j++) {
+                int minor_recency = recency_dt * j;
+                if (minor_recency >= total_frames) break; // Don't go past the start
+                
+                int minor_frame = total_frames - minor_recency + 1;
+                
+                float minor_x = get_x_pos(minor_frame);
+                
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, minor_x, y);
+                // Draw minor lines shorter for visual distinction
+                nvgLineTo(vg, minor_x, y + timeline_height * 0.5f); 
+                nvgStroke(vg);
+            }
+        }
+        
+        // Move to the next major power of 10 recency (1 -> 10 -> 100 -> ...)
+        if (recency_dt >= total_frames) break;
+        recency_dt *= 10;
+
+        // Ensure we don't skip the very first frame if it's not exactly a power of 10 recency
+        if (recency_dt > total_frames && major_tick_frame > 1) {
+            // Check if frame 1 was already drawn (it should be covered by a loop iteration if total_frames is a power of 10)
+            if (total_frames - (recency_dt / 10) + 1 != 1) {
+                 // Explicitly draw the line for Frame 1
+                nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255));
+                nvgStrokeWidth(vg, 1.5f);
+                
+                float final_x = get_x_pos(1); // Frame 1 maps to the far left
+                
+                nvgBeginPath(vg);
+                nvgMoveTo(vg, final_x, y);
+                nvgLineTo(vg, final_x, y + timeline_height);
+                nvgStroke(vg);
+                
+                char label_final[32];
+                snprintf(label_final, sizeof(label_final), "1");
+                nvgFontSize(vg, 12.0f);
+                nvgFillColor(vg, nvgRGBA(200, 200, 200, 255));
+                nvgText(vg, final_x, y - 5, label_final, NULL);
+            }
+            break; // Exit loop after processing the oldest frames
+        }
+    }
+
     float center_y = y + (grid_height / 2.0f) * tile_size;
     nvgBeginPath(vg);
     nvgMoveTo(vg, margin, center_y);
@@ -79,7 +186,8 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
 
     // Draw current frame indicator (playhead)
     if (tl_state.total_frames > 0) {
-        float x = margin + (tl_state.current_frame * timeline_width / std::max(1, tl_state.total_frames));
+        // --- FIX: Use the logarithmic get_x_pos function ---
+        float x = get_x_pos(tl_state.current_frame);
 
         // Draw playhead line (Blender-style blue)
         nvgBeginPath(vg);
@@ -105,7 +213,9 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
         nvgFontFace(vg, "ATARISTOCRAT");
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
         nvgFillColor(vg, nvgRGBA(255, 255, 255, 255));
-        nvgText(vg, x, y - 10, frame_text, NULL);
+        // Adjust text position slightly if near the edge (optional but good practice)
+        float text_x = (x > width - margin) ? width - margin : x;
+        nvgText(vg, text_x, y - 10, frame_text, NULL);
     }
 
     // Draw text info
@@ -130,14 +240,11 @@ bool check_timeline_click(float mouse_x, float mouse_y, int width, TimelineState
     float y = tl_state.timeline_y;
     float h = tl_state.timeline_height;
 
+    // Check if the click is within the timeline bounding box
     if (mouse_x >= margin && mouse_x <= margin + timeline_width &&
         mouse_y >= y && mouse_y <= y + h) {
-
-        // Calculate which frame was clicked
-        float normalized = (mouse_x - margin) / timeline_width;
-        int clicked_frame = (int)(normalized * tl_state.total_frames);
-        clicked_frame = std::max(0, std::min(clicked_frame, tl_state.total_frames));
-
+        
+        // This function only checks bounds; the actual frame calculation is done by get_frame_from_mouse.
         return true;
     }
     return false;
@@ -146,9 +253,42 @@ bool check_timeline_click(float mouse_x, float mouse_y, int width, TimelineState
 int get_frame_from_mouse(float mouse_x, int width, TimelineState& tl_state) {
     float margin = 20;
     float timeline_width = width - 2 * margin;
-    float normalized = (mouse_x - margin) / timeline_width;
-    int frame = (int)(normalized * tl_state.total_frames);
-    return std::max(0, std::min(frame, tl_state.total_frames));
+    int total_frames = tl_state.total_frames;
+
+    if (total_frames <= 0) return 0;
+    
+    // 1. Calculate Normalized X position (X_norm)
+    float normalized_x = (mouse_x - margin) / timeline_width;
+    
+    // Clamp normalized_x to [0, 1] range to handle clicks outside the exact bar bounds
+    normalized_x = std::max(0.0f, std::min(1.0f, normalized_x));
+
+    // Handle the far right edge (present frame, normalized_x = 1.0) explicitly to avoid log(0) issues if total_frames=1
+    if (normalized_x == 1.0f) {
+        return total_frames;
+    }
+
+    // Handle the far left edge (Frame 1, normalized_x = 0.0) explicitly
+    if (normalized_x == 0.0f) {
+        return 1;
+    }
+    
+    // 2. Calculate the Logarithmic Term
+    // We need log_max_recency (log10(N)) for the exponentiation
+    float log_max_recency = log10f((float)total_frames);
+    
+    // Calculate the exponent: (1 - X_norm) * log10(N)
+    float exponent = (1.0f - normalized_x) * log_max_recency;
+    
+    // 3. Calculate Recency (Delta t) using the inverse log: 10^exponent
+    // The pow(10.0f, exponent) is equivalent to the expression derived from the inverse log formula.
+    float recency_dt_float = powf(10.0f, exponent);
+    
+    // 4. Solve for Frame Index (i = N + 1 - dt)
+    int frame = (int)((float)total_frames + 1.0f - recency_dt_float);
+    
+    // Clamp the final frame index to the valid range [1, total_frames]
+    return std::max(1, std::min(frame, total_frames));
 }
 
 int main(int, char *[]) {

@@ -342,6 +342,33 @@ struct ComponentRegistry {
     }
 };
 
+// Track component operations that occurred this frame
+struct ComponentEvent {
+    flecs::entity_t entity;
+    flecs::entity_t component;
+    ComponentOp op;
+};
+
+// Track relationship operations that occurred this frame
+struct RelationshipEvent {
+    flecs::entity_t entity;      // Source entity
+    flecs::entity_t relation;    // Relationship type
+    flecs::entity_t target;      // Target entity
+    ComponentOp op;              // Add or Remove
+};
+
+// Track entity lifecycle events
+enum class EntityOp : uint8_t {
+    Create = 0,
+    Destroy = 1
+};
+
+struct EntityEvent {
+    flecs::entity_t entity;
+    EntityOp op;
+    std::string name;  // Store entity name for recreation
+};
+
 class StateHistory {
 public:
     flecs::world* world;
@@ -359,34 +386,10 @@ public:
     std::vector<ecs_entity_t> tracked_component_ids;
     std::vector<size_t> tracked_component_sizes;
 
-    // Track component operations that occurred this frame
-    struct ComponentEvent {
-        flecs::entity_t entity;
-        flecs::entity_t component;
-        ComponentOp op;
-    };
     std::vector<ComponentEvent> frame_events;
 
-    // Track relationship operations that occurred this frame
-    struct RelationshipEvent {
-        flecs::entity_t entity;      // Source entity
-        flecs::entity_t relation;    // Relationship type
-        flecs::entity_t target;      // Target entity
-        ComponentOp op;              // Add or Remove
-    };
     std::vector<RelationshipEvent> relationship_events;
 
-    // Track entity lifecycle events
-    enum class EntityOp : uint8_t {
-        Create = 0,
-        Destroy = 1
-    };
-
-    struct EntityEvent {
-        flecs::entity_t entity;
-        EntityOp op;
-        std::string name;  // Store entity name for recreation
-    };
     std::vector<EntityEvent> entity_events;
 
     // Track which entities exist (for keyframes and rollback)
@@ -2157,4 +2160,20 @@ public:
             std::cout << "Compression ratio: " << compression_ratio << "x\n";
         }
     }
+};
+
+// TODO: Migrate compression to TimelineHistory?
+// If there are lots of branches, then each of those branches essentially become
+struct TimelineNode
+{
+    StateHistory history;
+    int branch_frame; // The frame of the StateHistory at which this timeline diverges...
+    TimelineNode* parent;
+    std::vector<TimelineNode*> children;
+};
+
+class TimelineHistory
+{
+public:
+    TimelineNode* root;
 };
