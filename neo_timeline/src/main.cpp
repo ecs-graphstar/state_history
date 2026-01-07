@@ -24,6 +24,26 @@ struct TimelineState {
     float timeline_height = 80;
 };
 
+// Badge selection state for retroactive queries
+struct BadgeSelectionState {
+    int selected_badges[2] = {-1, -1};  // Indices of selected food types (-1 = none)
+    bool needs_resimulation = false;
+    float badge_size = 48.0f;
+    float badge_margin = 8.0f;
+    float badges_y = 460.0f;  // Y position for badge bar
+};
+
+// Resimulation progress state
+struct ResimulationState {
+    bool is_running = false;
+    int current_frame = 0;
+    int total_frames = 0;
+    int food_type_a = -1;
+    int food_type_b = -1;
+    int saved_frame = 0;  // Frame to restore after resimulation
+    int frames_per_batch = 60;  // Process 60 frames per render for faster scanning with visual feedback
+};
+
 struct FrameInterval
 {
     size_t start;
@@ -310,6 +330,216 @@ bool check_timeline_click(float mouse_x, float mouse_y, int width, TimelineState
     return false;
 }
 
+// Draw badge selection bar in two rows
+void draw_badges(NVGcontext* vg, int width, BadgeSelectionState& badge_state,
+                 const std::vector<int>& badge_sprites, const std::vector<std::string>& food_names) {
+    float margin = 20;
+    float badge_margin = badge_state.badge_margin;
+    float y = badge_state.badges_y;
+    float row_spacing = 6.0f;
+
+    int num_badges = badge_sprites.size();
+    int badges_per_row = (num_badges + 1) / 2;  // 10 badges per row
+
+    // Draw two rows
+    for (int row = 0; row < 2; row++) {
+        int start_idx = row * badges_per_row;
+        int end_idx = std::min(start_idx + badges_per_row, num_badges);
+
+        // Calculate row width
+        float row_width = 0;
+        int row_height = 0;
+        for (int i = start_idx; i < end_idx; i++) {
+            if (badge_sprites[i] == -1) continue;
+            int img_w, img_h;
+            nvgImageSize(vg, badge_sprites[i], &img_w, &img_h);
+            row_width += img_w;
+            if (img_h > row_height) row_height = img_h;
+            if (i < end_idx - 1) row_width += badge_margin;
+        }
+
+        float start_x = (width - row_width) / 2.0f;
+        float row_y = y + row * (row_height + row_spacing);
+
+        // Draw badges in this row
+        float current_x = start_x;
+        for (int i = start_idx; i < end_idx; i++) {
+            if (badge_sprites[i] == -1) continue;
+
+            int img_w, img_h;
+            nvgImageSize(vg, badge_sprites[i], &img_w, &img_h);
+
+            // Check if this badge is selected
+            bool is_selected = (badge_state.selected_badges[0] == i || badge_state.selected_badges[1] == i);
+
+            // Draw selection highlight - white outline with 2px gap
+            if (is_selected) {
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, current_x - 4, row_y - 4, img_w + 8, img_h + 8, 4);
+                nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 255));  // White
+                nvgStrokeWidth(vg, 2);
+                nvgStroke(vg);
+            }
+
+            // Draw badge image at native pixel size (1:1)
+            NVGpaint imgPaint = nvgImagePattern(vg, current_x, row_y, img_w, img_h, 0, badge_sprites[i], 1.0f);
+            nvgBeginPath(vg);
+            nvgRect(vg, current_x, row_y, img_w, img_h);
+            nvgFillPaint(vg, imgPaint);
+            nvgFill(vg);
+
+            current_x += img_w + badge_margin;
+        }
+    }
+
+    // Draw instruction text
+    nvgFontSize(vg, 14);
+    nvgFillColor(vg, nvgRGBA(200, 200, 200, 255));
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+
+    if (badge_state.selected_badges[0] == -1) {
+        nvgText(vg, width / 2.0f, y - 10, "Click two badges to query: [Fruit A] NearBy [Fruit B]", NULL);
+    } else if (badge_state.selected_badges[1] == -1) {
+        char text[128];
+        snprintf(text, sizeof(text), "Selected: %s - Click another badge",
+                 food_names[badge_state.selected_badges[0]].c_str());
+        nvgText(vg, width / 2.0f, y - 10, text, NULL);
+    } else {
+        char text[128];
+        snprintf(text, sizeof(text), "Query: %s NearBy %s (click to change)",
+                 food_names[badge_state.selected_badges[0]].c_str(),
+                 food_names[badge_state.selected_badges[1]].c_str());
+        nvgText(vg, width / 2.0f, y - 10, text, NULL);
+    }
+}
+
+// Check if a badge was clicked and return its index (-1 if none)
+int check_badge_click(NVGcontext* vg, float mouse_x, float mouse_y, int width,
+                      BadgeSelectionState& badge_state, const std::vector<int>& badge_sprites) {
+    float badge_margin = badge_state.badge_margin;
+    float y = badge_state.badges_y;
+    float row_spacing = 6.0f;
+    int num_badges = badge_sprites.size();
+    int badges_per_row = (num_badges + 1) / 2;
+
+    // Check both rows
+    for (int row = 0; row < 2; row++) {
+        int start_idx = row * badges_per_row;
+        int end_idx = std::min(start_idx + badges_per_row, num_badges);
+
+        // Calculate row width and height
+        float row_width = 0;
+        int row_height = 0;
+        for (int i = start_idx; i < end_idx; i++) {
+            if (badge_sprites[i] == -1) continue;
+            int img_w, img_h;
+            nvgImageSize(vg, badge_sprites[i], &img_w, &img_h);
+            row_width += img_w;
+            if (img_h > row_height) row_height = img_h;
+            if (i < end_idx - 1) row_width += badge_margin;
+        }
+
+        float start_x = (width - row_width) / 2.0f;
+        float row_y = y + row * (row_height + row_spacing);
+
+        // Check badges in this row
+        float current_x = start_x;
+        for (int i = start_idx; i < end_idx; i++) {
+            if (badge_sprites[i] == -1) continue;
+
+            int img_w, img_h;
+            nvgImageSize(vg, badge_sprites[i], &img_w, &img_h);
+
+            if (mouse_x >= current_x && mouse_x <= current_x + img_w &&
+                mouse_y >= row_y && mouse_y <= row_y + img_h) {
+                return i;
+            }
+
+            current_x += img_w + badge_margin;
+        }
+    }
+
+    return -1;
+}
+
+// Handle badge selection logic
+void handle_badge_selection(int clicked_badge, BadgeSelectionState& badge_state) {
+    if (clicked_badge < 0) return;
+
+    // If clicking an already selected badge, deselect it
+    if (badge_state.selected_badges[0] == clicked_badge) {
+        badge_state.selected_badges[0] = badge_state.selected_badges[1];
+        badge_state.selected_badges[1] = -1;
+        badge_state.needs_resimulation = true;
+        return;
+    }
+    if (badge_state.selected_badges[1] == clicked_badge) {
+        badge_state.selected_badges[1] = -1;
+        badge_state.needs_resimulation = true;
+        return;
+    }
+
+    // Add to selection
+    if (badge_state.selected_badges[0] == -1) {
+        badge_state.selected_badges[0] = clicked_badge;
+    } else if (badge_state.selected_badges[1] == -1) {
+        badge_state.selected_badges[1] = clicked_badge;
+        badge_state.needs_resimulation = true;
+    } else {
+        // Both slots full - replace second badge
+        badge_state.selected_badges[1] = clicked_badge;
+        badge_state.needs_resimulation = true;
+    }
+}
+
+// Draw resimulation scanning line on timeline (uses same logarithmic scale)
+void draw_resimulation_scanline(NVGcontext* vg, int width, TimelineState& tl_state,
+                                 ResimulationState& resim_state, const std::vector<std::string>& food_names) {
+    if (!resim_state.is_running) return;
+    if (resim_state.total_frames <= 1) return;
+
+    float margin = 20;
+    float timeline_width = width - 2 * margin;
+    float y = tl_state.timeline_y;
+    float timeline_height = tl_state.timeline_height;
+
+    // Calculate x position using same logarithmic scale as timeline
+    float log_max_recency = log10f((float)resim_state.total_frames);
+    int scan_frame = std::max(1, resim_state.current_frame);
+    int recency_dt = resim_state.total_frames - scan_frame + 1;
+    float normalized_log_recency = log10f((float)recency_dt) / log_max_recency;
+    float normalized_x = 1.0f - normalized_log_recency;
+    float scan_x = margin + normalized_x * timeline_width;
+
+    // Draw scanning line
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, scan_x, y);
+    nvgLineTo(vg, scan_x, y + timeline_height);
+    nvgStrokeColor(vg, nvgRGBA(255, 200, 50, 220));  // Yellow/orange scanning line
+    nvgStrokeWidth(vg, 3);
+    nvgStroke(vg);
+
+    // Draw scanning triangle at top
+    nvgBeginPath(vg);
+    nvgMoveTo(vg, scan_x, y);
+    nvgLineTo(vg, scan_x - 5, y - 7);
+    nvgLineTo(vg, scan_x + 5, y - 7);
+    nvgClosePath(vg);
+    nvgFillColor(vg, nvgRGBA(255, 200, 50, 220));
+    nvgFill(vg);
+
+    // Draw status text above timeline
+    char text[128];
+    snprintf(text, sizeof(text), "Scanning: %s NearBy %s  [%d / %d]",
+             food_names[resim_state.food_type_a].c_str(),
+             food_names[resim_state.food_type_b].c_str(),
+             resim_state.current_frame, resim_state.total_frames);
+    nvgFontSize(vg, 14);
+    nvgFillColor(vg, nvgRGBA(255, 200, 50, 255));
+    nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
+    nvgText(vg, width / 2.0f, y - 30, text, NULL);
+}
+
 int get_frame_from_mouse(float mouse_x, int width, TimelineState& tl_state) {
     float margin = 20;
     float timeline_width = width - 2 * margin;
@@ -363,8 +593,8 @@ int main(int, char *[]) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
 
-    int window_width = 1000;
-    int window_height = 600;
+    int window_width = 1200;
+    int window_height = 700;
     GLFWwindow* window = glfwCreateWindow(window_width, window_height, "State History Timeline Demo", NULL, NULL);
     if (window == NULL) {
         std::cerr << "Failed to create GLFW window" << std::endl;
@@ -429,6 +659,20 @@ int main(int, char *[]) {
     }
     std::cout << "Loaded " << food_sprites.size() << " food sprites\n";
 
+    // Load badge images for the selection UI
+    std::vector<int> badge_sprites;
+    for (const auto& name : food_names) {
+        std::string path = "../assets/food/" + name + "_badge.png";
+        int img = nvgCreateImage(vg, path.c_str(), 0);
+        if (img != -1) {
+            badge_sprites.push_back(img);
+        } else {
+            std::cerr << "Failed to load badge: " << path << std::endl;
+            badge_sprites.push_back(-1);  // Keep index alignment
+        }
+    }
+    std::cout << "Loaded " << badge_sprites.size() << " badge sprites\n";
+
     // Create flecs world
     flecs::world ecs;
 
@@ -441,6 +685,16 @@ int main(int, char *[]) {
 
     // Timeline state
     TimelineState tl_state;
+    tl_state.timeline_y = 620;  // Push timeline down to make room for badges
+
+    // Badge selection state
+    BadgeSelectionState badge_state;
+    badge_state.badges_y = 520;  // Position badges between simulation and timeline
+    badge_state.badge_size = 24.0f;  // Same size as native sprites
+    badge_state.badge_margin = 4.0f;
+
+    // Resimulation state
+    ResimulationState resim_state;
 
     flecs::entity retroactive_query = ecs.entity()
         .add<TimelineDomain>();
@@ -448,8 +702,8 @@ int main(int, char *[]) {
     // Create entities with random properties
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::uniform_real_distribution<> pos_x_dist(0.0, 1000.0);
-    std::uniform_real_distribution<> pos_y_dist(0.0, 450.0);
+    std::uniform_real_distribution<> pos_x_dist(0.0, 1200.0);
+    std::uniform_real_distribution<> pos_y_dist(0.0, 450.0);  // Keep Y below badge bar
     std::uniform_real_distribution<> vel_dist(-100.0, 100.0);
     std::uniform_real_distribution<> radius_dist(3.0, 8.0);
     std::uniform_real_distribution<> health_dist(20.0f, 100.0f);
@@ -476,41 +730,104 @@ int main(int, char *[]) {
         entity.set<Health>({health, 100.0f});
         entity.set<RenderColor>({0xFF00FF00, radius});  // Start green, will be updated by health system
         entity.set<FoodSprite>({sprite_idx, sprite_scale});
+        entity.add<FoodType>((FoodType)(sprite_idx));  // Tag entity with food type
         history.track_entity(entity);
     }
 
-    // Example retroactive timeline query system....
-    // this will eventually need to be refactored to Python server/client for runtime synthesis 
-    
-    ecs.system<TimelineDomain>()
-    .each([&](flecs::entity e, TimelineDomain& domain) {
+    // Start incremental resimulation
+    auto start_resimulation = [&](int food_type_a, int food_type_b) {
+        if (food_type_a < 0 || food_type_b < 0) return;
+
+
+        // Reset timeline domain
+        TimelineDomain& domain = retroactive_query.ensure<TimelineDomain>();
+        domain.intervals.clear();
+        domain.mark_frames_count = 0;
         domain.mark_frame = false;
-    });
+        domain.frames_since_start = 0;
 
-    ecs.system<TimelineDomain>()
-    .term_at(0).src(retroactive_query)
-    .with(FoodType::Strawberry)
-    .with(NearBy, "$fruit")
-    .with(FoodType::Tomato).src("$fruit")
-    .each([&](flecs::entity e, TimelineDomain& domain)
-    {
-        std::cout << e << " (Banana) is near a Peach" << std::endl;
-        domain.mark_frame = true;
-        domain.mark_frames_count++;
-        // TODO: We should track frame intervals or alternatively use an int with count for frames...
-        // for sparse relationships, the vector of intervals makes sense...
-    });
+        // Initialize resimulation state
+        resim_state.is_running = true;
+        resim_state.current_frame = 0;
+        resim_state.total_frames = tl_state.total_frames;
+        resim_state.food_type_a = food_type_a;
+        resim_state.food_type_b = food_type_b;
+        resim_state.saved_frame = tl_state.current_frame;
 
-    ecs.system<TimelineDomain>()
-    .each([&](flecs::entity e, TimelineDomain& domain) {
-        domain.frames_since_start++;
-        if (!domain.mark_frame && domain.mark_frames_count)
-        {
-            size_t start_frame = domain.frames_since_start-domain.mark_frames_count;
-            domain.intervals.push_back({start_frame, start_frame+domain.mark_frames_count});
-            domain.mark_frames_count = 0;
+        // Roll back to start
+        history.rollback_to(0);
+    };
+
+    // Step through resimulation - returns true when complete
+    auto step_resimulation = [&]() -> bool {
+        if (!resim_state.is_running) return true;
+
+        TimelineDomain& domain = retroactive_query.ensure<TimelineDomain>();
+        int end_frame = std::min(resim_state.current_frame + resim_state.frames_per_batch,
+                                  resim_state.total_frames + 1);
+
+        for (int frame = resim_state.current_frame; frame < end_frame; frame++) {
+            // Apply this frame's state
+            if (frame > 0) {
+                history.roll_forward(frame);
+            }
+
+            // Check query: any entity with food_type_a NearBy any entity with food_type_b
+            domain.mark_frame = false;
+
+            // Build query dynamically
+            auto q = ecs.query_builder()
+                .with((FoodType)resim_state.food_type_a)
+                .with(NearBy, flecs::Wildcard)
+                .build();
+
+            q.each([&](flecs::entity e) {
+                // Check if this entity is near an entity with food_type_b
+                e.each([&](flecs::id rel_id) {
+                    if (rel_id.is_pair() && rel_id.first() == NearBy) {
+                        flecs::entity target = rel_id.second();
+                        if (target.is_alive() && target.has((FoodType)resim_state.food_type_b)) {
+                            domain.mark_frame = true;
+                        }
+                    }
+                });
+            });
+
+            // Update interval tracking
+            domain.frames_since_start++;
+            if (domain.mark_frame) {
+                domain.mark_frames_count++;
+            } else if (domain.mark_frames_count > 0) {
+                size_t start_frame = domain.frames_since_start - domain.mark_frames_count - 1;
+                domain.intervals.push_back({start_frame, start_frame + domain.mark_frames_count});
+                domain.mark_frames_count = 0;
+            }
         }
-    });
+
+        resim_state.current_frame = end_frame;
+
+        // Check if complete
+        if (resim_state.current_frame > resim_state.total_frames) {
+            // Close any remaining open interval
+            if (domain.mark_frames_count > 0) {
+                size_t start_frame = domain.frames_since_start - domain.mark_frames_count;
+                domain.intervals.push_back({start_frame, domain.frames_since_start});
+                domain.mark_frames_count = 0;
+            }
+
+            // Restore to saved frame
+            history.rollback_to(0);
+            if (resim_state.saved_frame > 0) {
+                history.roll_forward(resim_state.saved_frame);
+            }
+            tl_state.current_frame = resim_state.saved_frame;
+
+            resim_state.is_running = false;
+            return true;
+        }
+
+        return false;
+    };
 
     // Movement system with bouncing
     auto movementSystem = ecs.system<Position, Velocity, RenderColor>()
@@ -521,9 +838,9 @@ int main(int, char *[]) {
             pos.y += vel.y * dt;
 
             // Bounce off walls (accounting for radius)
-            if (pos.x - color.radius <= 0 || pos.x + color.radius >= 1000) {
+            if (pos.x - color.radius <= 0 || pos.x + color.radius >= 1200) {
                 vel.x *= -1.0;
-                pos.x = std::max((double)color.radius, std::min(1000.0 - color.radius, pos.x));
+                pos.x = std::max((double)color.radius, std::min(1200.0 - color.radius, pos.x));
             }
             if (pos.y - color.radius <= 0 || pos.y + color.radius >= 450) {
                 vel.y *= -1.0;
@@ -625,6 +942,7 @@ int main(int, char *[]) {
     std::cout << "  LEFT/RIGHT Arrow: Step backward/forward one frame\n";
     std::cout << "  SPACEBAR: Play/Pause playback\n";
     std::cout << "  Mouse Click: Click timeline to scrub to frame\n";
+    std::cout << "  Badge Click: Select two badges to run retroactive NearBy query\n";
     std::cout << "  ESC: Exit\n\n";
 
     // Mouse state
@@ -659,13 +977,15 @@ int main(int, char *[]) {
 
         // Handle timeline interaction
         if (is_mouse_down && !was_mouse_down) {
-            // Mouse just pressed
-            if (check_timeline_click(mouse_x, mouse_y, window_width, tl_state)) {
+            // Mouse just pressed - check badge click first
+            int clicked_badge = check_badge_click(vg, mouse_x, mouse_y, window_width, badge_state, badge_sprites);
+            if (clicked_badge >= 0 && !tl_state.is_recording) {
+                handle_badge_selection(clicked_badge, badge_state);
+            }
+            else if (check_timeline_click(mouse_x, mouse_y, window_width, tl_state)) {
                 tl_state.mouse_down_on_timeline = true;
                 tl_state.is_recording = false;
                 int target_frame = get_frame_from_mouse(mouse_x, window_width, tl_state);
-
-                std::cout << "Scrubbing to frame " << target_frame << "\n";
 
                 if (target_frame < tl_state.current_frame) {
                     history.rollback_to(target_frame);
@@ -691,6 +1011,24 @@ int main(int, char *[]) {
         }
 
         was_mouse_down = is_mouse_down;
+
+        // Start retroactive query when two badges are selected
+        if (badge_state.needs_resimulation && !tl_state.is_recording && !resim_state.is_running) {
+            badge_state.needs_resimulation = false;
+            if (badge_state.selected_badges[0] >= 0 && badge_state.selected_badges[1] >= 0) {
+                start_resimulation(badge_state.selected_badges[0], badge_state.selected_badges[1]);
+            } else {
+                // Clear query results if not enough badges selected
+                TimelineDomain& domain = retroactive_query.ensure<TimelineDomain>();
+                domain.intervals.clear();
+                domain.mark_frames_count = 0;
+            }
+        }
+
+        // Step through resimulation if running
+        if (resim_state.is_running) {
+            step_resimulation();
+        }
 
         // Handle keyboard controls
         int left_key = glfwGetKey(window, GLFW_KEY_LEFT);
@@ -889,6 +1227,14 @@ int main(int, char *[]) {
 
         // Draw timeline
         draw_timeline(vg, window_width, window_height, tl_state, history, retroactive_query);
+
+        // Draw badge selection bar (only when not recording)
+        if (!tl_state.is_recording) {
+            draw_badges(vg, window_width, badge_state, badge_sprites, food_names);
+        }
+
+        // Draw resimulation scanning line on timeline
+        draw_resimulation_scanline(vg, window_width, tl_state, resim_state, food_names);
 
         nvgEndFrame(vg);
 
