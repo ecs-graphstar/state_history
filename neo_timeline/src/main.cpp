@@ -24,11 +24,25 @@ struct TimelineState {
     float timeline_height = 80;
 };
 
+struct FrameInterval
+{
+    size_t start;
+    size_t end; // exclusive
+};
+
+struct TimelineDomain
+{
+    size_t frames_since_start = 0;
+    size_t mark_frames_count;
+    bool mark_frame;
+    std::vector<FrameInterval> intervals;
+};
+
 void error_callback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
 }
 
-void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_state, StateHistory& history) {
+void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_state, StateHistory& history, flecs::entity retroactive_query) {
     float margin = 20;
     float timeline_width = width - 2 * margin;
     float y = tl_state.timeline_y;
@@ -42,8 +56,9 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
 
     // The maximum frame count (N)
     int total_frames = tl_state.total_frames;
+    
+    // Handle empty timeline
     if (total_frames <= 1) {
-        // Draw a simple line for minimal frames and exit
         nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255));
         nvgStrokeWidth(vg, 2.0f);
         nvgBeginPath(vg);
@@ -58,15 +73,21 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
 
     // Lambda to get the x-coordinate for a given frame index (RECENCY-BASED logarithmic scale)
     auto get_x_pos = [&](int frame_index) -> float {
+        // Clamp frame_index to [1, total_frames] to prevent log(0) errors
+        int clamped_idx = std::max(1, std::min(frame_index, total_frames));
+        
         // 1. Calculate Recency (Delta t): Time elapsed since this frame
-        int recency_dt = total_frames - frame_index + 1;
-        if (recency_dt < 1) recency_dt = 1; 
-
+        //    Frame N (Present) -> Recency 1
+        //    Frame 1 (Past)    -> Recency N
+        int recency_dt = total_frames - clamped_idx + 1;
+        
         // 2. Calculate normalized logarithmic recency
+        //    log(1) = 0 (Right), log(N) = max (Left)
         float normalized_log_recency = log10f((float)recency_dt) / log_max_recency;
         
         // 3. Invert the result to prioritize the present (right side)
-        // Log(1) is 0, so 1 - 0 puts the present frame on the far right (x=timeline_width)
+        //    Recency 1 (Present) -> normalized_log = 0 -> x = 1.0 (Right)
+        //    Recency N (Past)    -> normalized_log = 1 -> x = 0.0 (Left)
         float normalized_x = 1.0f - normalized_log_recency;
         
         return margin + normalized_x * timeline_width;
@@ -85,6 +106,55 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
         nvgStroke(vg);
     }
 
+    // **********************************************************************
+    // --- Draw TimelineDomain Intervals ------------------------------------
+    // **********************************************************************
+    const TimelineDomain* domain = retroactive_query.try_get<TimelineDomain>();
+    if (domain) {
+        // Same color as NearBy relationship edges
+        NVGcolor interval_color = nvgRGBA(100, 100, 255, 128); 
+        float query_line_y = y + 0 * tile_size; // Top row
+
+        nvgFillColor(vg, interval_color);
+        
+        // 1. Draw Completed Intervals
+        for (const auto& interval : domain->intervals) {
+            // Start (older) is on the left
+            float x_left = get_x_pos(interval.start); 
+            // End (newer) is on the right. 
+            // We use interval.end directly because it maps to the moment the interval closed.
+            float x_right = get_x_pos(interval.end);
+
+            float width_px = x_right - x_left;
+            
+            // --- ENFORCE MINIMUM WIDTH ---
+            // Even if the interval compressed to 0.001px, draw it as 1.0px so it remains visible
+            if (width_px < 1.0f) width_px = 1.0f;
+
+            nvgBeginPath(vg);
+            nvgRect(vg, x_left, query_line_y, width_px, tile_size); 
+            nvgFill(vg);
+        }
+
+        // 2. Draw Currently Active Interval (if recording)
+        if (domain->mark_frames_count > 0 && tl_state.is_recording) {
+            // The active interval started 'count' frames ago relative to now
+            size_t start_frame = domain->frames_since_start - domain->mark_frames_count + 1;
+            
+            float x_left_active = get_x_pos(start_frame);
+            float x_right_active = get_x_pos(total_frames); // Extends to the present
+
+            float width_active = x_right_active - x_left_active;
+            
+            // --- ENFORCE MINIMUM WIDTH FOR ACTIVE INTERVAL TOO ---
+            if (width_active < 1.0f) width_active = 1.0f;
+
+            nvgBeginPath(vg);
+            nvgRect(vg, x_left_active, query_line_y, width_active, tile_size); 
+            nvgFill(vg);
+        }
+    }
+
     // ----------------------------------------------------------------------
     // --- Draw Logarithmic Vertical Grid (Recency-Based) -------------------
     // ----------------------------------------------------------------------
@@ -93,17 +163,15 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
     int recency_dt = 1; 
 
     while (true) {
-        
-        // Find the frame index corresponding to the current major recency (1, 10, 100, 1000...)
+        // Find the frame index corresponding to this recency (e.g., 1 frame ago, 10 frames ago...)
         int major_tick_frame = total_frames - recency_dt + 1;
         
-        // Exit loop if the major tick is beyond the start of the timeline (Frame 1)
+        // Exit if we've gone past the start of the timeline
         if (major_tick_frame < 1 && recency_dt > total_frames) break;
         
-        // --- Draw Major Ticks ---
-        // These mark time that is 1 frame ago, 10 frames ago, 100 frames ago, etc.
+        // --- Draw Major Ticks (Powers of 10) ---
         if (major_tick_frame >= 1) {
-            nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255)); // Darker
+            nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255)); // Darker gray
             nvgStrokeWidth(vg, 1.5f);
             
             float major_x = get_x_pos(major_tick_frame);
@@ -113,91 +181,82 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
             nvgLineTo(vg, major_x, y + timeline_height);
             nvgStroke(vg);
             
-            // Draw the Recency Label (e.g., "100 dt" or "Frame 9901")
+            // Label
             char label[32];
             snprintf(label, sizeof(label), "%d", major_tick_frame);
             nvgFontSize(vg, 12.0f);
             nvgFillColor(vg, nvgRGBA(200, 200, 200, 255));
-            // Adjust label position slightly if near the edge
-            float label_x = (major_x > width - margin - 10) ? major_x - 10 : major_x; 
+            // Keep label inside screen bounds
+            float label_x = (major_x > width - margin - 20) ? major_x - 20 : major_x + 5; 
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
             nvgText(vg, label_x, y - 5, label, NULL);
         }
         
-        // --- Draw Minor Ticks ---
-        // Only draw minor ticks if we haven't reached the full extent of the timeline
+        // --- Draw Minor Ticks (2x, 3x, ... 9x) ---
         if (recency_dt * 10 <= total_frames || major_tick_frame > 1) {
-            
-            nvgStrokeColor(vg, nvgRGBA(60, 60, 60, 255)); // Lighter/Default
+            nvgStrokeColor(vg, nvgRGBA(60, 60, 60, 255)); // Lighter gray
             nvgStrokeWidth(vg, 1.0f);
             
-            // Loop for minor recencies (2*dt, 3*dt, ... 9*dt)
             for (int j = 2; j <= 9; j++) {
                 int minor_recency = recency_dt * j;
-                if (minor_recency >= total_frames) break; // Don't go past the start
+                if (minor_recency >= total_frames) break; 
                 
                 int minor_frame = total_frames - minor_recency + 1;
-                
                 float minor_x = get_x_pos(minor_frame);
                 
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, minor_x, y);
-                // Draw minor lines shorter for visual distinction
-                nvgLineTo(vg, minor_x, y + timeline_height * 0.5f); 
+                nvgLineTo(vg, minor_x, y + timeline_height * 0.5f); // Short ticks
                 nvgStroke(vg);
             }
         }
         
-        // Move to the next major power of 10 recency (1 -> 10 -> 100 -> ...)
+        // Move to next power of 10
         if (recency_dt >= total_frames) break;
         recency_dt *= 10;
 
-        // Ensure we don't skip the very first frame if it's not exactly a power of 10 recency
+        // Force draw of Frame 1 if not covered by power-of-10 loop
         if (recency_dt > total_frames && major_tick_frame > 1) {
-            // Check if frame 1 was already drawn (it should be covered by a loop iteration if total_frames is a power of 10)
             if (total_frames - (recency_dt / 10) + 1 != 1) {
-                 // Explicitly draw the line for Frame 1
+                float final_x = get_x_pos(1);
+                
                 nvgStrokeColor(vg, nvgRGBA(100, 100, 100, 255));
                 nvgStrokeWidth(vg, 1.5f);
-                
-                float final_x = get_x_pos(1); // Frame 1 maps to the far left
-                
                 nvgBeginPath(vg);
                 nvgMoveTo(vg, final_x, y);
                 nvgLineTo(vg, final_x, y + timeline_height);
                 nvgStroke(vg);
                 
-                char label_final[32];
-                snprintf(label_final, sizeof(label_final), "1");
-                nvgFontSize(vg, 12.0f);
                 nvgFillColor(vg, nvgRGBA(200, 200, 200, 255));
-                nvgText(vg, final_x, y - 5, label_final, NULL);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_BOTTOM);
+                nvgText(vg, final_x, y - 5, "1", NULL);
             }
-            break; // Exit loop after processing the oldest frames
+            break; 
         }
     }
 
+    // Draw Center Line
     float center_y = y + (grid_height / 2.0f) * tile_size;
     nvgBeginPath(vg);
     nvgMoveTo(vg, margin, center_y);
     nvgLineTo(vg, margin + timeline_width, center_y);
-    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 255));
-    nvgStrokeWidth(vg, 2);
+    nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 50));
+    nvgStrokeWidth(vg, 1);
     nvgStroke(vg);
 
-    // Draw current frame indicator (playhead)
+    // Draw Playhead
     if (tl_state.total_frames > 0) {
-        // --- FIX: Use the logarithmic get_x_pos function ---
         float x = get_x_pos(tl_state.current_frame);
 
-        // Draw playhead line (Blender-style blue)
+        // Line
         nvgBeginPath(vg);
         nvgMoveTo(vg, x, y);
         nvgLineTo(vg, x, y + timeline_height);
         nvgStrokeColor(vg, nvgRGBA(64, 156, 255, 255));
-        nvgStrokeWidth(vg, 3);
+        nvgStrokeWidth(vg, 2);
         nvgStroke(vg);
 
-        // Draw playhead triangle
+        // Triangle Header
         nvgBeginPath(vg);
         nvgMoveTo(vg, x, y);
         nvgLineTo(vg, x - 6, y - 8);
@@ -206,19 +265,20 @@ void draw_timeline(NVGcontext* vg, int width, int height, TimelineState& tl_stat
         nvgFillColor(vg, nvgRGBA(64, 156, 255, 255));
         nvgFill(vg);
 
-        // Draw frame number above playhead
+        // Frame Number Text
         char frame_text[32];
         snprintf(frame_text, sizeof(frame_text), "%d", tl_state.current_frame);
         nvgFontSize(vg, 16);
         nvgFontFace(vg, "ATARISTOCRAT");
         nvgTextAlign(vg, NVG_ALIGN_CENTER | NVG_ALIGN_BOTTOM);
         nvgFillColor(vg, nvgRGBA(255, 255, 255, 255));
-        // Adjust text position slightly if near the edge (optional but good practice)
-        float text_x = (x > width - margin) ? width - margin : x;
+        
+        // Clamp text to screen edges
+        float text_x = std::max(margin + 20, std::min(x, width - margin - 20));
         nvgText(vg, text_x, y - 10, frame_text, NULL);
     }
 
-    // Draw text info
+    // Draw Status Text
     nvgFontSize(vg, 18);
     nvgFontFace(vg, "sans");
     nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
@@ -333,6 +393,30 @@ int main(int, char *[]) {
         "kiwi", "lemon", "mushroom", "olive", "orange", "papper", "papaya",
         "peach", "pear", "pineapple", "strawberry", "tomato", "watermelon"
     };
+
+    enum class FoodType {
+        Apple,
+        Banana,
+        Bean,
+        Candy,
+        Carrot,
+        Cherry,
+        Dragonfruit,
+        Kiwi,
+        Lemon,
+        Mushroom,
+        Olive,
+        Orange,
+        Pepper, // Note: Corrected "papper" to "Pepper"
+        Papaya,
+        Peach,
+        Pear,
+        Pineapple,
+        Strawberry,
+        Tomato,
+        Watermelon
+    };
+
     std::vector<int> food_sprites;
     for (const auto& name : food_names) {
         std::string path = "../assets/food/" + name + ".png";
@@ -357,6 +441,9 @@ int main(int, char *[]) {
 
     // Timeline state
     TimelineState tl_state;
+
+    flecs::entity retroactive_query = ecs.entity()
+        .add<TimelineDomain>();
 
     // Create entities with random properties
     std::random_device rd;
@@ -391,6 +478,39 @@ int main(int, char *[]) {
         entity.set<FoodSprite>({sprite_idx, sprite_scale});
         history.track_entity(entity);
     }
+
+    // Example retroactive timeline query system....
+    // this will eventually need to be refactored to Python server/client for runtime synthesis 
+    
+    ecs.system<TimelineDomain>()
+    .each([&](flecs::entity e, TimelineDomain& domain) {
+        domain.mark_frame = false;
+    });
+
+    ecs.system<TimelineDomain>()
+    .term_at(0).src(retroactive_query)
+    .with(FoodType::Strawberry)
+    .with(NearBy, "$fruit")
+    .with(FoodType::Tomato).src("$fruit")
+    .each([&](flecs::entity e, TimelineDomain& domain)
+    {
+        std::cout << e << " (Banana) is near a Peach" << std::endl;
+        domain.mark_frame = true;
+        domain.mark_frames_count++;
+        // TODO: We should track frame intervals or alternatively use an int with count for frames...
+        // for sparse relationships, the vector of intervals makes sense...
+    });
+
+    ecs.system<TimelineDomain>()
+    .each([&](flecs::entity e, TimelineDomain& domain) {
+        domain.frames_since_start++;
+        if (!domain.mark_frame && domain.mark_frames_count)
+        {
+            size_t start_frame = domain.frames_since_start-domain.mark_frames_count;
+            domain.intervals.push_back({start_frame, start_frame+domain.mark_frames_count});
+            domain.mark_frames_count = 0;
+        }
+    });
 
     // Movement system with bouncing
     auto movementSystem = ecs.system<Position, Velocity, RenderColor>()
@@ -682,6 +802,7 @@ int main(int, char *[]) {
                     entity.set<Health>({health, 100.0f});
                     entity.set<RenderColor>({0xFF00FF00, radius});  // Start green, will be updated by health system
                     entity.set<FoodSprite>({sprite_idx, sprite_scale});
+                    entity.add<FoodType>((FoodType)(sprite_idx));
                 }
             }
 
@@ -767,7 +888,7 @@ int main(int, char *[]) {
         });
 
         // Draw timeline
-        draw_timeline(vg, window_width, window_height, tl_state, history);
+        draw_timeline(vg, window_width, window_height, tl_state, history, retroactive_query);
 
         nvgEndFrame(vg);
 
