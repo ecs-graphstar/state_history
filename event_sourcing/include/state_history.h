@@ -402,40 +402,27 @@ public:
 
     StateHistory(flecs::world* w, size_t keyframe_every = 60, bool compress = true)
         : world(w), keyframe_interval(keyframe_every), enable_compression(compress), current_frame(0), recording_enabled(true) {
+    }
 
-        // Initialize tracked component IDs and sizes
-        tracked_component_ids = {
-            w->component<Position>().id(),
-            w->component<Velocity>().id(),
-            w->component<Health>().id(),
-            w->component<Damage>().id(),
-            w->component<Armor>().id(),
-            w->component<Zen>().id(),
-            w->component<AttackPower>().id(),
-            w->component<MovementSpeed>().id(),
-            w->component<Experience>().id(),
-        };
-        tracked_component_sizes = {
-            sizeof(Position),
-            sizeof(Velocity),
-            sizeof(Health),
-            sizeof(Damage),
-            sizeof(Armor),
-            sizeof(Zen),
-            sizeof(AttackPower),
-            sizeof(MovementSpeed),
-            sizeof(Experience),
-        };
-
-        // Register all component types with their sizes
-        for (size_t i = 0; i < tracked_component_ids.size(); ++i) {
-            registry.register_component(tracked_component_ids[i], tracked_component_sizes[i]);
+    // Call this for each component type before calling setup_observers().
+    template <typename T>
+    void register_component() {
+        flecs::entity_t id = world->component<T>().id();
+        size_t size = sizeof(T);
+        
+        // Avoid duplicate registration
+        if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), id) == tracked_component_ids.end()) {
+            tracked_component_ids.push_back(id);
+            tracked_component_sizes.push_back(size);
+            registry.register_component(id, size);
         }
     }
 
     void setup_observers() {
+        // Observers are used for Event Sourcing of creation and deletion events
         // Track operations for all registered components using C API
         for (ecs_entity_t comp_id : tracked_component_ids) {
+            
             // OnAdd observer
             ecs_observer_desc_t add_desc = {};
             add_desc.query.terms[0].id = comp_id;

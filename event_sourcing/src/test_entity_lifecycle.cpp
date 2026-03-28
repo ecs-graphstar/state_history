@@ -30,6 +30,7 @@ int main() {
 
     flecs::world ecs;
     StateHistory history(&ecs, 5, false);  // Keyframe every 5 frames, no compression
+    register_all_components(history);
     history.setup_observers();
 
     std::cout << "Test 1: Entity Creation\n";

@@ -1,7 +1,7 @@
 #pragma once
 
-// All component definitions for the ECS system
-// These will be automatically detected by generate_state_history.py
+class StateHistory;
+void register_all_components(StateHistory& history);
 
 struct Position {
     double x, y;
@@ -20,8 +20,6 @@ struct Damage {
     float amount;
 };
 
-// Example: Adding a new component is as simple as defining a struct here
-// CMake will automatically regenerate state_history.h when you run make
 struct Armor {
     int defense;
     float durability;
@@ -32,7 +30,6 @@ struct Zen {
     float maximum;
 };
 
-// Combat-related components
 struct AttackPower {
     float damage;
     float range;
