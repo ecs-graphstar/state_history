@@ -11,6 +11,8 @@
 #include <unordered_set>
 #include <algorithm>
 #include <zlib.h>
+#include <future>
+#include <thread>
 
 // NOTE: Component structs must be defined before including this header
 
@@ -55,24 +57,6 @@ struct Snapshot {
     uint32_t total_uncompressed_size;  // For stats only
 
     Snapshot() : frame(0), flags(0), total_uncompressed_size(0) {}
-
-    std::vector<uint8_t> to_wire() const {
-        std::vector<uint8_t> wire;
-        wire.resize(sizeof(frame) + sizeof(flags) + buffer.size());
-        std::memcpy(wire.data(), &frame, sizeof(frame));
-        std::memcpy(wire.data() + sizeof(frame), &flags, sizeof(flags));
-        std::memcpy(wire.data() + sizeof(frame) + sizeof(flags), buffer.data(), buffer.size());
-        return wire;
-    }
-
-    static Snapshot from_wire(const uint8_t* data, size_t len) {
-        Snapshot s;
-        if (len < sizeof(s.frame) + sizeof(s.flags)) return s;
-        std::memcpy(&s.frame, data, sizeof(s.frame));
-        std::memcpy(&s.flags, data + sizeof(s.frame), sizeof(s.flags));
-        s.buffer.assign(data + sizeof(s.frame) + sizeof(s.flags), data + len);
-        return s;
-    }
 
     bool is_keyframe() const { return flags & FLAG_IS_KEYFRAME; }
     void set_keyframe(bool value) {
@@ -358,6 +342,33 @@ struct ComponentRegistry {
     }
 };
 
+// Track component operations that occurred this frame
+struct ComponentEvent {
+    flecs::entity_t entity;
+    flecs::entity_t component;
+    ComponentOp op;
+};
+
+// Track relationship operations that occurred this frame
+struct RelationshipEvent {
+    flecs::entity_t entity;      // Source entity
+    flecs::entity_t relation;    // Relationship type
+    flecs::entity_t target;      // Target entity
+    ComponentOp op;              // Add or Remove
+};
+
+// Track entity lifecycle events
+enum class EntityOp : uint8_t {
+    Create = 0,
+    Destroy = 1
+};
+
+struct EntityEvent {
+    flecs::entity_t entity;
+    EntityOp op;
+    std::string name;  // Store entity name for recreation
+};
+
 class StateHistory {
 public:
     flecs::world* world;
@@ -375,34 +386,10 @@ public:
     std::vector<ecs_entity_t> tracked_component_ids;
     std::vector<size_t> tracked_component_sizes;
 
-    // Track component operations that occurred this frame
-    struct ComponentEvent {
-        flecs::entity_t entity;
-        flecs::entity_t component;
-        ComponentOp op;
-    };
     std::vector<ComponentEvent> frame_events;
 
-    // Track relationship operations that occurred this frame
-    struct RelationshipEvent {
-        flecs::entity_t entity;      // Source entity
-        flecs::entity_t relation;    // Relationship type
-        flecs::entity_t target;      // Target entity
-        ComponentOp op;              // Add or Remove
-    };
     std::vector<RelationshipEvent> relationship_events;
 
-    // Track entity lifecycle events
-    enum class EntityOp : uint8_t {
-        Create = 0,
-        Destroy = 1
-    };
-
-    struct EntityEvent {
-        flecs::entity_t entity;
-        EntityOp op;
-        std::string name;  // Store entity name for recreation
-    };
     std::vector<EntityEvent> entity_events;
 
     // Track which entities exist (for keyframes and rollback)
@@ -437,10 +424,8 @@ public:
     }
 
     void setup_observers() {
-        // Observers are used for Event Sourcing of creation and deletion events
         // Track operations for all registered components using C API
         for (ecs_entity_t comp_id : tracked_component_ids) {
-            
             // OnAdd observer
             ecs_observer_desc_t add_desc = {};
             add_desc.query.terms[0].id = comp_id;
@@ -696,7 +681,7 @@ public:
 
         int result = compress2(compressed.data(), &compressed_size,
                               input.data(), input.size(),
-                              Z_BEST_COMPRESSION);
+                              Z_BEST_SPEED);
 
         if (result != Z_OK) {
             return input;
@@ -864,9 +849,12 @@ public:
             }
         }
 
-        // Encode and compress entity lifecycle data
-        SectionData entity_section = encode_and_compress_entities(entities_created_vec, entities_destroyed_vec, existing_entities_set);
+        // Launch entity encoding/compression async
+        auto entity_future = std::async(std::launch::async, [this, entities_created_vec, entities_destroyed_vec, existing_entities_set]() {
+            return encode_and_compress_entities(entities_created_vec, entities_destroyed_vec, existing_entities_set);
+        });
 
+        // Capture components (must be sequential - queries ECS world)
         if (snapshot.is_keyframe()) {
             // For keyframes, capture ALL components
             capture_all_components(snapshot, headers, data_section);
@@ -875,8 +863,11 @@ public:
             capture_changed_components(snapshot, headers, data_section);
         }
 
-        // Pack component buffer
+        // Pack component buffer and launch compression + relationship capture in parallel
         SectionData component_section;
+        std::future<SectionData> component_future;
+        std::future<SectionData> relationship_future;
+
         if (!headers.empty()) {
             size_t total_size = sizeof(uint32_t) +
                               headers.size() * sizeof(ComponentHeader) +
@@ -898,29 +889,49 @@ public:
                                  data_section.begin(),
                                  data_section.end());
 
-            component_section.uncompressed_size = static_cast<uint32_t>(uncompressed_buffer.size());
+            uint32_t uncompressed_size = static_cast<uint32_t>(uncompressed_buffer.size());
 
-            if (enable_compression) {
-                component_section.data = compress_buffer(uncompressed_buffer);
-                component_section.compressed = true;
-            } else {
-                component_section.data = std::move(uncompressed_buffer);
-                component_section.compressed = false;
-            }
+            // Launch component compression async
+            component_future = std::async(std::launch::async, [this, uncompressed_buffer = std::move(uncompressed_buffer), uncompressed_size]() mutable {
+                SectionData section;
+                section.uncompressed_size = uncompressed_size;
 
-            component_section.data.shrink_to_fit();
+                if (enable_compression) {
+                    section.data = compress_buffer(uncompressed_buffer);
+                    section.compressed = true;
+                } else {
+                    section.data = std::move(uncompressed_buffer);
+                    section.compressed = false;
+                }
+
+                section.data.shrink_to_fit();
+                return section;
+            });
         } else {
-            component_section.uncompressed_size = 0;
-            component_section.compressed = false;
+            // Empty component section
+            component_future = std::async(std::launch::async, []() {
+                SectionData section;
+                section.uncompressed_size = 0;
+                section.compressed = false;
+                return section;
+            });
         }
 
-        // Capture relationships
-        SectionData relationship_section;
+        // Launch relationship capture async
         if (snapshot.is_keyframe()) {
-            relationship_section = capture_all_relationships();
+            relationship_future = std::async(std::launch::async, [this]() {
+                return capture_all_relationships();
+            });
         } else {
-            relationship_section = capture_changed_relationships();
+            relationship_future = std::async(std::launch::async, [this]() {
+                return capture_changed_relationships();
+            });
         }
+
+        // Wait for all three async operations to complete
+        SectionData entity_section = entity_future.get();
+        component_section = component_future.get();
+        SectionData relationship_section = relationship_future.get();
 
         // Finalize snapshot with all sections
         finalize_snapshot(snapshot, component_section, entity_section, relationship_section);
@@ -1090,11 +1101,22 @@ public:
             header.op = event.op;
             relationships.push_back(header);
 
+            // Debug output - only if entities are still alive
             flecs::entity e(world->get_world(), event.entity);
             flecs::entity rel(world->get_world(), event.relation);
             flecs::entity tgt(world->get_world(), event.target);
-            std::cout << "    Captured: " << e.name() << " -[" << rel.name() << "]-> " << tgt.name()
-                     << " (op=" << (int)event.op << ")\n";
+            if (e.is_alive() && rel.is_alive() && tgt.is_alive()) {
+                const char* e_name = e.name();
+                const char* rel_name = rel.name();
+                const char* tgt_name = tgt.name();
+                std::cout << "    Captured: " << (e_name ? e_name : "unnamed") << " -["
+                         << (rel_name ? rel_name : "unnamed") << "]-> "
+                         << (tgt_name ? tgt_name : "unnamed")
+                         << " (op=" << (int)event.op << ")\n";
+            } else {
+                std::cout << "    Captured: " << event.entity << " -[" << event.relation
+                         << "]-> " << event.target << " (op=" << (int)event.op << ") [destroyed]\n";
+            }
         }
 
         return encode_and_compress_relationships(relationships);
@@ -1326,6 +1348,8 @@ public:
         entity_events.clear();
     }
 
+    // TODO: Consider only rolling forward a subset of entities/components/relationship types
+    // to accelerate retroactive queries
     void roll_forward(size_t target_frame) {
         if (target_frame >= snapshots.size()) {
             std::cout << "Cannot roll forward to frame " << target_frame
@@ -1345,10 +1369,26 @@ public:
         // Disable event recording during roll forward
         recording_enabled = false;
 
-        // Apply snapshots forward from current position to target
-        for (size_t i = current_frame; i <= target_frame; ++i) {
-            std::cout << "Applying frame " << i << " forward\n";
-            apply_snapshot_forward(snapshots[i]);
+        // Find the nearest previous keyframe to target
+        size_t keyframe_idx = (target_frame / keyframe_interval) * keyframe_interval;
+        std::cout << "Jumping to keyframe " << keyframe_idx << "\n";
+
+        // Clear all tracked components from entities before restore
+        clear_all_components();
+
+        // Restore entities from keyframe (destroys/recreates as needed)
+        restore_entities_from_keyframe(keyframe_idx);
+
+        // Restore components from keyframe
+        restore_keyframe(keyframe_idx);
+
+        // Apply diffs from keyframe to target frame
+        if (keyframe_idx < target_frame) {
+            std::cout << "Applying events from frame " << (keyframe_idx + 1)
+                      << " to " << target_frame << "\n";
+            for (size_t i = keyframe_idx + 1; i <= target_frame; ++i) {
+                apply_snapshot_forward(snapshots[i]);
+            }
         }
 
         // Re-enable event recording
@@ -1549,7 +1589,37 @@ public:
         }
 
         auto& snapshot = snapshots[frame_idx];
-        std::vector<uint8_t> decompressed = snapshot.get_decompressed_buffer();
+
+        // Check total compressed size to decide if parallelization is worth it
+        auto comp_info = snapshot.get_component_info();
+        auto rel_info = snapshot.get_relationship_info();
+        size_t total_compressed = comp_info.size + rel_info.size;
+
+        // Only use parallel decompression if we have at least 8KB of data
+        // (thread overhead isn't worth it for small snapshots)
+        constexpr size_t PARALLEL_THRESHOLD = 8192;
+
+        std::vector<uint8_t> decompressed;
+        std::vector<RelationshipHeader> relationships;
+
+        if (total_compressed >= PARALLEL_THRESHOLD) {
+            // Decompress component and relationship buffers in parallel
+            auto component_future = std::async(std::launch::async, [&snapshot]() {
+                return snapshot.get_decompressed_buffer();
+            });
+
+            auto relationship_future = std::async(std::launch::async, [&snapshot]() {
+                return snapshot.decode_relationships();
+            });
+
+            // Wait for decompression to complete
+            decompressed = component_future.get();
+            relationships = relationship_future.get();
+        } else {
+            // Sequential decompression for small snapshots
+            decompressed = snapshot.get_decompressed_buffer();
+            relationships = snapshot.decode_relationships();
+        }
 
         if (decompressed.empty() || decompressed.size() < sizeof(uint32_t)) {
             return;
@@ -1597,7 +1667,6 @@ public:
         world->defer_end();
 
         // Restore relationships
-        auto relationships = snapshot.decode_relationships();
         world->defer_begin();
         for (const auto& rel_header : relationships) {
             // Remap entity ID if needed
@@ -1622,7 +1691,45 @@ public:
     }
 
     void apply_snapshot_forward(Snapshot& snapshot) {
-        auto relationships = snapshot.decode_relationships();
+        // Check total compressed size to decide if parallelization is worth it
+        auto comp_info = snapshot.get_component_info();
+        auto ent_info = snapshot.get_entity_info();
+        auto rel_info = snapshot.get_relationship_info();
+        size_t total_compressed = comp_info.size + ent_info.size + rel_info.size;
+
+        // Only use parallel decompression if we have at least 8KB of data
+        // (thread overhead isn't worth it for small differential snapshots)
+        constexpr size_t PARALLEL_THRESHOLD = 8192;
+
+        std::vector<RelationshipHeader> relationships;
+        Snapshot::EntityLifecycle lifecycle;
+        std::vector<uint8_t> decompressed;
+
+        if (total_compressed >= PARALLEL_THRESHOLD) {
+            // Launch all three decompressions in parallel
+            auto relationship_future = std::async(std::launch::async, [&snapshot]() {
+                return snapshot.decode_relationships();
+            });
+
+            auto entity_future = std::async(std::launch::async, [&snapshot]() {
+                return snapshot.decode_entities();
+            });
+
+            auto component_future = std::async(std::launch::async, [&snapshot]() {
+                return snapshot.get_decompressed_buffer();
+            });
+
+            // Wait for decompressions to complete
+            relationships = relationship_future.get();
+            lifecycle = entity_future.get();
+            decompressed = component_future.get();
+        } else {
+            // Sequential decompression for small snapshots
+            relationships = snapshot.decode_relationships();
+            lifecycle = snapshot.decode_entities();
+            decompressed = snapshot.get_decompressed_buffer();
+        }
+
         std::cout << "  Applying frame " << snapshot.frame << " (relationships: " << relationships.size() << ")\n";
 
         // Track which entities are destroyed in this frame to skip their component operations
@@ -1635,8 +1742,6 @@ public:
             // Fall through to relationship application at the end
         } else {
             std::cout << "  [DEBUG] Not a keyframe, processing diff frame\n";
-
-        auto lifecycle = snapshot.decode_entities();
 
         // Apply entity lifecycle events first
         for (const auto& [old_id, name] : lifecycle.entities_created) {
@@ -1669,8 +1774,6 @@ public:
             tracked_entities.erase(id);
             entity_names.erase(id);
         }
-
-        std::vector<uint8_t> decompressed = snapshot.get_decompressed_buffer();
 
         if (decompressed.empty() || decompressed.size() < sizeof(uint32_t)) {
             std::cout << "  [DEBUG] Buffer is empty, but will apply relationships at end\n";
@@ -1773,11 +1876,25 @@ public:
 
             if (rel_header.op == ComponentOp::Add) {
                 // Add the relationship
-                std::cout << "      Adding relationship: " << e.name() << " -[" << rel.name() << "]-> " << tgt.name() << "\n";
+                if (e.is_alive() && rel.is_alive() && tgt.is_alive()) {
+                    const char* e_name = e.name();
+                    const char* rel_name = rel.name();
+                    const char* tgt_name = tgt.name();
+                    std::cout << "      Adding relationship: " << (e_name ? e_name : "unnamed") << " -["
+                             << (rel_name ? rel_name : "unnamed") << "]-> "
+                             << (tgt_name ? tgt_name : "unnamed") << "\n";
+                }
                 e.add(rel_header.relation, target_id);
             } else if (rel_header.op == ComponentOp::Remove) {
                 // Remove the relationship
-                std::cout << "      Removing relationship: " << e.name() << " -[" << rel.name() << "]-> " << tgt.name() << "\n";
+                if (e.is_alive() && rel.is_alive() && tgt.is_alive()) {
+                    const char* e_name = e.name();
+                    const char* rel_name = rel.name();
+                    const char* tgt_name = tgt.name();
+                    std::cout << "      Removing relationship: " << (e_name ? e_name : "unnamed") << " -["
+                             << (rel_name ? rel_name : "unnamed") << "]-> "
+                             << (tgt_name ? tgt_name : "unnamed") << "\n";
+                }
                 e.remove(rel_header.relation, target_id);
             }
         }
@@ -2042,4 +2159,20 @@ public:
             std::cout << "Compression ratio: " << compression_ratio << "x\n";
         }
     }
+};
+
+// TODO: Migrate compression to TimelineHistory?
+// If there are lots of branches, then each of those branches essentially become
+struct TimelineNode
+{
+    StateHistory history;
+    int branch_frame; // The frame of the StateHistory at which this timeline diverges...
+    TimelineNode* parent;
+    std::vector<TimelineNode*> children;
+};
+
+class TimelineHistory
+{
+public:
+    TimelineNode* root;
 };

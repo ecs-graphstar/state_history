@@ -15,6 +15,7 @@ int main(int, char *[]) {
 
     // Use a small keyframe interval for testing
     StateHistory history(&ecs, 100, true);
+    register_all_components(history);
     history.setup_observers();
 
     // Define tag components
