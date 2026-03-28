@@ -430,6 +430,20 @@ public:
         }
     }
 
+    // Call this for each component type before calling setup_observers().
+    template <typename T>
+    void register_component() {
+        flecs::entity_t id = world->component<T>().id();
+        size_t size = sizeof(T);
+        
+        // Avoid duplicate registration
+        if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), id) == tracked_component_ids.end()) {
+            tracked_component_ids.push_back(id);
+            tracked_component_sizes.push_back(size);
+            registry.register_component(id, size);
+        }
+    }
+
     void setup_observers() {
         // Track operations for all registered components using C API
         for (ecs_entity_t comp_id : tracked_component_ids) {

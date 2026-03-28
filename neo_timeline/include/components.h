@@ -2,6 +2,9 @@
 
 #include <cstdint>
 
+class StateHistory;
+void register_all_components(StateHistory& history);
+
 // Component definitions for visual timeline demo
 struct Position {
     double x, y;
@@ -22,6 +25,6 @@ struct RenderColor {
 };
 
 struct FoodSprite {
-    int sprite_index;  // Index into the food sprites array
-    float scale;       // Size multiplier for the sprite
+    int sprite_index;
+    float scale;
 };

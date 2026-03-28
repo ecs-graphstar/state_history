@@ -32,6 +32,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
     "include"
+    "../snapshot/include"
     "../project_template_ui/deps/flecs/include"
     "../project_template_ui/deps/glfw/include"
     "../project_template_ui/deps/nanovg/src"

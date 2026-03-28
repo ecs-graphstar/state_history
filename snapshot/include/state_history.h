@@ -56,6 +56,24 @@ struct Snapshot {
 
     Snapshot() : frame(0), flags(0), total_uncompressed_size(0) {}
 
+    std::vector<uint8_t> to_wire() const {
+        std::vector<uint8_t> wire;
+        wire.resize(sizeof(frame) + sizeof(flags) + buffer.size());
+        std::memcpy(wire.data(), &frame, sizeof(frame));
+        std::memcpy(wire.data() + sizeof(frame), &flags, sizeof(flags));
+        std::memcpy(wire.data() + sizeof(frame) + sizeof(flags), buffer.data(), buffer.size());
+        return wire;
+    }
+
+    static Snapshot from_wire(const uint8_t* data, size_t len) {
+        Snapshot s;
+        if (len < sizeof(s.frame) + sizeof(s.flags)) return s;
+        std::memcpy(&s.frame, data, sizeof(s.frame));
+        std::memcpy(&s.flags, data + sizeof(s.frame), sizeof(s.flags));
+        s.buffer.assign(data + sizeof(s.frame) + sizeof(s.flags), data + len);
+        return s;
+    }
+
     bool is_keyframe() const { return flags & FLAG_IS_KEYFRAME; }
     void set_keyframe(bool value) {
         if (value) flags |= FLAG_IS_KEYFRAME;

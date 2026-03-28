@@ -681,6 +681,7 @@ int main(int, char *[]) {
 
     // Initialize state history with 100-frame keyframes, compression enabled
     StateHistory history(&ecs, 100, true);
+    register_all_components(history);
     history.setup_observers();
 
     // Timeline state

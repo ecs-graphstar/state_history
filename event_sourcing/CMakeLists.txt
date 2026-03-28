@@ -11,6 +11,7 @@ target_link_libraries(project_settings INTERFACE flecs ZLIB::ZLIB)
 target_include_directories(project_settings INTERFACE
     "src"
     "include"
+    "../snapshot/include"
     "../project_template_ui/deps/flecs/include"
 )
 
