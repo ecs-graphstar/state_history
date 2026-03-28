@@ -1355,6 +1355,8 @@ public:
         entity_events.clear();
     }
 
+    // TODO: Consider only rolling forward a subset of entities/components/relationship types
+    // to accelerate retroactive queries
     void roll_forward(size_t target_frame) {
         if (target_frame >= snapshots.size()) {
             std::cout << "Cannot roll forward to frame " << target_frame

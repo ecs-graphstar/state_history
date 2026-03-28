@@ -766,6 +766,12 @@ int main(int, char *[]) {
         int end_frame = std::min(resim_state.current_frame + resim_state.frames_per_batch,
                                   resim_state.total_frames + 1);
 
+        auto q = ecs.query_builder()
+            .with((FoodType)resim_state.food_type_a)
+            .with(NearBy, "$X")
+            .with((FoodType)resim_state.food_type_b).src("$X")
+            .build();
+
         for (int frame = resim_state.current_frame; frame < end_frame; frame++) {
             // Apply this frame's state
             if (frame > 0) {
@@ -775,22 +781,8 @@ int main(int, char *[]) {
             // Check query: any entity with food_type_a NearBy any entity with food_type_b
             domain.mark_frame = false;
 
-            // Build query dynamically
-            auto q = ecs.query_builder()
-                .with((FoodType)resim_state.food_type_a)
-                .with(NearBy, flecs::Wildcard)
-                .build();
-
             q.each([&](flecs::entity e) {
-                // Check if this entity is near an entity with food_type_b
-                e.each([&](flecs::id rel_id) {
-                    if (rel_id.is_pair() && rel_id.first() == NearBy) {
-                        flecs::entity target = rel_id.second();
-                        if (target.is_alive() && target.has((FoodType)resim_state.food_type_b)) {
-                            domain.mark_frame = true;
-                        }
-                    }
-                });
+                domain.mark_frame = true;
             });
 
             // Update interval tracking
