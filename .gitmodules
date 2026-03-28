@@ -1,0 +1,3 @@
+[submodule "project_template_ui"]
+	path = project_template_ui
+	url = git@github.com:ecs-graphstar/project_template_ui.git
