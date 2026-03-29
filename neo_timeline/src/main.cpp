@@ -10,8 +10,8 @@
 #include <flecs.h>
 #include <nanovg.h>
 #include <nanovg_gl.h>
-#include "../include/components.h"
-#include "../include/state_history.h"
+#include "components.h"
+#include "state_history.h"
 
 // Timeline UI state
 struct TimelineState {
@@ -615,7 +615,7 @@ int main(int, char *[]) {
         glfwTerminate();
         return -1;
     }
-    nvgCreateFont(vg, "ATARISTOCRAT", "../assets/ATARISTOCRAT.ttf");
+    nvgCreateFont(vg, "ATARISTOCRAT", "assets/ATARISTOCRAT.ttf");
 
     // Load food sprites
     std::vector<std::string> food_names = {
@@ -649,7 +649,7 @@ int main(int, char *[]) {
 
     std::vector<int> food_sprites;
     for (const auto& name : food_names) {
-        std::string path = "../assets/food/" + name + ".png";
+        std::string path = "assets/food/" + name + ".png";
         int img = nvgCreateImage(vg, path.c_str(), 0);
         if (img != -1) {
             food_sprites.push_back(img);
@@ -662,7 +662,7 @@ int main(int, char *[]) {
     // Load badge images for the selection UI
     std::vector<int> badge_sprites;
     for (const auto& name : food_names) {
-        std::string path = "../assets/food/" + name + "_badge.png";
+        std::string path = "assets/food/" + name + "_badge.png";
         int img = nvgCreateImage(vg, path.c_str(), 0);
         if (img != -1) {
             badge_sprites.push_back(img);
@@ -728,8 +728,8 @@ int main(int, char *[]) {
 
         entity.set<Position>({px, py});
         entity.set<Velocity>({vx, vy});
-        entity.set<Health>({health, 100.0f});
-        entity.set<RenderColor>({0xFF00FF00, radius});  // Start green, will be updated by health system
+        //entity.set<Health>({health, 100.0f});
+        entity.set<RenderColor>({0xFFFFFFFF, radius});  // Start green, will be updated by health system
         entity.set<FoodSprite>({sprite_idx, sprite_scale});
         entity.add<FoodType>((FoodType)(sprite_idx));  // Tag entity with food type
         history.track_entity(entity);
