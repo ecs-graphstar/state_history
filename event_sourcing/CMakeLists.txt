@@ -16,6 +16,7 @@ target_include_directories(project_settings INTERFACE
 )
 
 set(TEST_TARGETS
+    branch_entity_simple
     test_event_sourcing
     test_entity_lifecycle
     test_entity_simple

@@ -396,6 +396,7 @@ public:
     std::unordered_set<flecs::entity_t> tracked_entities;
     std::unordered_map<flecs::entity_t, std::string> entity_names;
 
+    // TODO: What happens if there are multiple recreated entities that reuse an id in a StateHistory?
     // Map old entity IDs to new IDs during rollback (when entities are recreated)
     std::unordered_map<flecs::entity_t, flecs::entity_t> entity_id_remap;
 
@@ -1318,6 +1319,7 @@ public:
         // Disable event recording during rollback
         recording_enabled = false;
 
+        // TODO: Support dynamic keyframes
         size_t keyframe_idx = (target_frame / keyframe_interval) * keyframe_interval;
         std::cout << "Jumping to keyframe " << keyframe_idx << "\n";
 
@@ -1400,6 +1402,18 @@ public:
         frame_events.clear();
         entity_events.clear();
     }
+
+    void roll_to(size_t target_frame) 
+    {
+        if (current_frame < target_frame)
+        {
+            roll_forward(target_frame);
+        } else if (current_frame > target_frame)
+        {
+            rollback_to(target_frame);
+        }
+    }
+
 
     void restore_entities_from_keyframe(size_t frame_idx) {
         if (!snapshots[frame_idx].is_keyframe()) {
@@ -2025,14 +2039,37 @@ public:
 // If there are lots of branches, then each of those branches essentially become
 struct TimelineNode
 {
-    StateHistory history;
-    int branch_frame; // The frame of the StateHistory at which this timeline diverges...
+    StateHistory* history;
+    uint32_t branch_frame; // The frame of the StateHistory at which this timeline diverges...
     TimelineNode* parent;
     std::vector<TimelineNode*> children;
 };
 
-class TimelineHistory
+class TimelineTree
 {
 public:
-    TimelineNode* root;
+    TimelineNode* root_timeline;
+    // Do we need to store an active timeline?
+    // TimelineNode* active_timeline;
+    size_t active_frame;
+
+    void roll_to(TimelineNode* node, size_t target_frame)
+    {   
+        if (node->parent == nullptr) // root node
+        {
+            node->history->roll_to(target_frame);
+        }
+        else
+        {
+            // Start from the snapshot of the parent at branchframe
+            node->parent->history->roll_to(node->branch_frame);
+            if (target_frame > 0)
+            {
+                node->history->entity_id_remap = node->parent->history->entity_id_remap;
+                // Non root nodes are offset by 1 such that the 0th index is the
+                // first delta from their source made into a full keyframe
+                node->history->roll_to(target_frame-1);
+            }
+        }
+    }
 };
