@@ -1,5 +1,7 @@
 add_rules("mode.debug", "mode.release")
 
+add_rules("plugin.compile_commands.autoupdate")
+
 set_languages("cxx17")
 
 add_requires("flecs", "glad", "glfw", "nanovg", "tracy")
