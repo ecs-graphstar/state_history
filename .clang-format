@@ -1,0 +1,3 @@
+BasedOnStyle: Chromium
+LineEnding: LF
+ColumnLimit: 120
