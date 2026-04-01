@@ -1,8 +1,11 @@
 // Component definitions must be included before state_history.h
 #include "components.h"
-#include "state_history.h"
-#include <random>
+
+#include <state_history.h>
+
 #include <cmath>
+#include <iostream>
+#include <random>
 
 struct Attacking {};
 

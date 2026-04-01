@@ -1,17 +1,19 @@
-#include <iostream>
-#include <cmath>
-#include <vector>
+#include "components.h"
+
+#include <state_history.h>
+
 #include <algorithm>
-#include <variant>
+#include <cmath>
+#include <iostream>
 #include <string>
+#include <vector>
 #include <random>
+
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <flecs.h>
 #include <nanovg.h>
 #include <nanovg_gl.h>
-#include "components.h"
-#include "state_history.h"
 
 // Timeline UI state
 struct TimelineState {
