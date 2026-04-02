@@ -4,7 +4,6 @@
 // do not manually modify state_history.h
 
 #include <flecs.h>
-#include <iostream>
 #include <vector>
 #include <cstring>
 #include <unordered_map>
@@ -14,6 +13,17 @@
 #include <future>
 #include <thread>
 #include <memory>
+#include <spdlog/spdlog.h>
+
+namespace state_history_detail {
+    inline bool init_logging() {
+        if (spdlog::default_logger()->level() == spdlog::level::info) {
+            spdlog::set_level(spdlog::level::off);
+        }
+        return true;
+    }
+    inline bool _logging_init = init_logging();
+}
 
 // NOTE: Component structs must be defined before including this header
 
@@ -144,7 +154,7 @@ struct Snapshot {
                                               buffer.data() + info.offset, info.size);
 
         if (ZSTD_isError(result)) {
-            std::cerr << "Decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
+            spdlog::error("Decompression failed with error: {}", ZSTD_getErrorName(result));
             return {};
         }
 
@@ -201,7 +211,7 @@ struct Snapshot {
                                               buffer.data() + info.offset, info.size);
 
         if (ZSTD_isError(result)) {
-            std::cerr << "Relationship decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
+            spdlog::error("Relationship decompression failed with error: {}", ZSTD_getErrorName(result));
             return {};
         }
 
@@ -254,7 +264,7 @@ struct Snapshot {
                                               buffer.data() + info.offset, info.size);
 
         if (ZSTD_isError(result)) {
-            std::cerr << "Entity decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
+            spdlog::error("Entity decompression failed with error: {}", ZSTD_getErrorName(result));
             return {};
         }
 
@@ -938,15 +948,17 @@ public:
 
         if (snapshots.size() <= 10 || snapshots.size() % 50 == 0) {
             const auto& last = snapshots.back();
-            std::cout << "  [Captured frame " << (snapshots.size() - 1);
-            if (last.is_keyframe()) std::cout << " - KEYFRAME";
             if (last.buffer.size() > 24 && last.total_uncompressed_size > 0) {
                 double ratio = (double)last.total_uncompressed_size / (last.buffer.size() - 24);
-                std::cout << " - compressed " << last.total_uncompressed_size
-                         << " -> " << (last.buffer.size() - 24) << " bytes ("
-                         << ratio << "x)";
+                spdlog::info("Captured frame {} {}- compressed {} -> {} bytes ({:.2f}x)",
+                    snapshots.size() - 1,
+                    last.is_keyframe() ? "- KEYFRAME " : "",
+                    last.total_uncompressed_size, last.buffer.size() - 24, ratio);
+            } else {
+                spdlog::info("Captured frame {} {}",
+                    snapshots.size() - 1,
+                    last.is_keyframe() ? "- KEYFRAME" : "");
             }
-            std::cout << "]\n";
         }
     }
 
@@ -1050,7 +1062,7 @@ public:
 
     SectionData capture_changed_relationships() {
         // For diff frames, only capture relationship events that occurred
-        std::cout << "  [Capturing " << relationship_events.size() << " relationship events]\n";
+        spdlog::debug("Capturing {} relationship events", relationship_events.size());
 
         std::vector<RelationshipHeader> relationships;
 
@@ -1070,13 +1082,12 @@ public:
                 const char* e_name = e.name();
                 const char* rel_name = rel.name();
                 const char* tgt_name = tgt.name();
-                std::cout << "    Captured: " << (e_name ? e_name : "unnamed") << " -["
-                         << (rel_name ? rel_name : "unnamed") << "]-> "
-                         << (tgt_name ? tgt_name : "unnamed")
-                         << " (op=" << (int)event.op << ")\n";
+                spdlog::debug("Captured: {} -[{}]-> {} (op={})",
+                    e_name ? e_name : "unnamed", rel_name ? rel_name : "unnamed",
+                    tgt_name ? tgt_name : "unnamed", (int)event.op);
             } else {
-                std::cout << "    Captured: " << event.entity << " -[" << event.relation
-                         << "]-> " << event.target << " (op=" << (int)event.op << ") [destroyed]\n";
+                spdlog::debug("Captured: {} -[{}]-> {} (op={}) [destroyed]",
+                    event.entity, event.relation, event.target, (int)event.op);
             }
         }
 
@@ -1269,19 +1280,18 @@ public:
 
     void rollback_to(size_t target_frame) {
         if (target_frame >= snapshots.size()) {
-            std::cout << "Cannot rollback to frame " << target_frame << "\n";
+            spdlog::warn("Cannot rollback to frame {}", target_frame);
             return;
         }
 
-        std::cout << "\n=== Rolling back from frame " << (current_frame - 1)
-                  << " to frame " << target_frame << " ===\n";
+        spdlog::info("Rolling back from frame {} to frame {}", current_frame - 1, target_frame);
 
         // Disable event recording during rollback
         recording_enabled = false;
 
         // TODO: Support dynamic keyframes
         size_t keyframe_idx = (target_frame / keyframe_interval) * keyframe_interval;
-        std::cout << "Jumping to keyframe " << keyframe_idx << "\n";
+        spdlog::info("Jumping to keyframe {}", keyframe_idx);
 
         // Clear all tracked components from entities before restore
         clear_all_components();
@@ -1293,8 +1303,7 @@ public:
         restore_keyframe(keyframe_idx);
 
         if (keyframe_idx < target_frame) {
-            std::cout << "Applying events from frame " << (keyframe_idx + 1)
-                      << " to " << target_frame << "\n";
+            spdlog::info("Applying events from frame {} to {}", keyframe_idx + 1, target_frame);
             for (size_t i = keyframe_idx + 1; i <= target_frame; ++i) {
                 apply_snapshot_forward(snapshots[i]);
             }
@@ -1314,26 +1323,23 @@ public:
     // to accelerate retroactive queries
     void roll_forward(size_t target_frame) {
         if (target_frame >= snapshots.size()) {
-            std::cout << "Cannot roll forward to frame " << target_frame
-                      << " (only " << snapshots.size() << " frames exist)\n";
+            spdlog::warn("Cannot roll forward to frame {} (only {} frames exist)", target_frame, snapshots.size());
             return;
         }
 
         if (target_frame < current_frame - 1) {
-            std::cout << "Cannot roll forward to frame " << target_frame
-                      << " (currently at frame " << (current_frame - 1) << ")\n";
+            spdlog::warn("Cannot roll forward to frame {} (currently at frame {})", target_frame, current_frame - 1);
             return;
         }
 
-        std::cout << "\n=== Rolling forward from frame " << (current_frame - 1)
-                  << " to frame " << target_frame << " ===\n";
+        spdlog::info("Rolling forward from frame {} to frame {}", current_frame - 1, target_frame);
 
         // Disable event recording during roll forward
         recording_enabled = false;
 
         // Find the nearest previous keyframe to target
         size_t keyframe_idx = (target_frame / keyframe_interval) * keyframe_interval;
-        std::cout << "Jumping to keyframe " << keyframe_idx << "\n";
+        spdlog::info("Jumping to keyframe {}", keyframe_idx);
 
         // Clear all tracked components from entities before restore
         clear_all_components();
@@ -1346,8 +1352,7 @@ public:
 
         // Apply diffs from keyframe to target frame
         if (keyframe_idx < target_frame) {
-            std::cout << "Applying events from frame " << (keyframe_idx + 1)
-                      << " to " << target_frame << "\n";
+            spdlog::info("Applying events from frame {} to {}", keyframe_idx + 1, target_frame);
             for (size_t i = keyframe_idx + 1; i <= target_frame; ++i) {
                 apply_snapshot_forward(snapshots[i]);
             }
@@ -1377,15 +1382,15 @@ public:
 
     void restore_entities_from_keyframe(size_t frame_idx) {
         if (!snapshots[frame_idx].is_keyframe()) {
-            std::cerr << "Error: Frame " << frame_idx << " is not a keyframe!\n";
+            spdlog::error("Frame {} is not a keyframe", frame_idx);
             return;
         }
 
         auto& snapshot = snapshots[frame_idx];
         auto lifecycle = snapshot.decode_entities();
 
-        std::cout << "  Restoring entities from keyframe " << frame_idx << "\n";
-        std::cout << "  Snapshot has " << lifecycle.existing_entities.size() << " entities\n";
+        spdlog::debug("Restoring entities from keyframe {}", frame_idx);
+        spdlog::debug("Snapshot has {} entities", lifecycle.existing_entities.size());
 
         // Clear entity ID remap for this rollback
         entity_id_remap.clear();
@@ -1394,27 +1399,27 @@ public:
         entity_names.clear();
         for (const auto& [id, name] : lifecycle.entities_created) {
             entity_names[id] = name;
-            std::cout << "  Restored entity name: " << id << " -> " << name << "\n";
+            spdlog::debug("Restored entity name: {} -> {}", id, name);
         }
 
         // Get current tracked entities (entities we're managing in the history)
         std::unordered_set<flecs::entity_t> current_entities = tracked_entities;
-        std::cout << "  Current tracked entities: " << current_entities.size() << "\n";
+        spdlog::debug("Current tracked entities: {}", current_entities.size());
 
         // Destroy entities that shouldn't exist at keyframe
         for (flecs::entity_t id : current_entities) {
             if (lifecycle.existing_entities.find(id) == lifecycle.existing_entities.end()) {
-                std::cout << "  Destroying entity " << id << "\n";
+                spdlog::debug("Destroying entity {}", id);
                 flecs::entity e(world->get_world(), id);
                 if (e.is_alive()) {
-                    std::cout << "    Entity is alive, calling destruct...\n";
+                    spdlog::debug("Entity is alive, calling destruct...");
                     e.destruct();
-                    std::cout << "    Destruct completed\n";
+                    spdlog::debug("Destruct completed");
                 }
             }
         }
 
-        std::cout << "  Destruction phase complete\n";
+        spdlog::debug("Destruction phase complete");
 
         // Create entities that should exist (by name) and build ID remap
         tracked_entities.clear();
@@ -1426,13 +1431,13 @@ public:
                 entity_id_remap[old_id] = e.id();
                 tracked_entities.insert(e.id());
                 entity_names[e.id()] = name;
-                std::cout << "  Recreated entity " << name << ": old ID " << old_id << " -> new ID " << e.id() << "\n";
+                spdlog::debug("Recreated entity {}: old ID {} -> new ID {}", name, old_id, e.id());
             } else {
-                std::cerr << "Warning: Entity " << old_id << " has no name, cannot recreate\n";
+                spdlog::warn("Entity {} has no name, cannot recreate", old_id);
             }
         }
 
-        std::cout << "  Entity restoration complete\n";
+        spdlog::debug("Entity restoration complete");
     }
 
     void clear_all_components() {
@@ -1536,7 +1541,7 @@ public:
 
     void restore_keyframe(size_t frame_idx) {
         if (!snapshots[frame_idx].is_keyframe()) {
-            std::cerr << "Error: Frame " << frame_idx << " is not a keyframe!\n";
+            spdlog::error("Frame {} is not a keyframe", frame_idx);
             return;
         }
 
@@ -1584,7 +1589,7 @@ public:
 
                 // Keyframes should only contain Add operations
                 if (header->op != ComponentOp::Add) {
-                    std::cerr << "Warning: Non-Add operation in keyframe!\n";
+                    spdlog::warn("Non-Add operation in keyframe");
                     continue;
                 }
 
@@ -1680,7 +1685,7 @@ public:
             decompressed = snapshot.get_decompressed_buffer();
         }
 
-        std::cout << "  Applying frame " << snapshot.frame << " (relationships: " << relationships.size() << ")\n";
+        spdlog::info("Applying frame {} (relationships: {})", snapshot.frame, relationships.size());
 
         // Track which entities are destroyed in this frame to skip their component operations
         std::unordered_set<flecs::entity_t> destroyed_this_frame;
@@ -1688,10 +1693,10 @@ public:
         if (snapshot.is_keyframe()) {
             restore_entities_from_keyframe(snapshot.frame);
             restore_keyframe(snapshot.frame);
-            std::cout << "  [DEBUG] Keyframe restored, now will apply relationships\n";
+            spdlog::debug("Keyframe restored, now will apply relationships");
             // Fall through to relationship application at the end
         } else {
-            std::cout << "  [DEBUG] Not a keyframe, processing diff frame\n";
+            spdlog::debug("Not a keyframe, processing diff frame");
 
         // Apply entity lifecycle events first
         for (const auto& [old_id, name] : lifecycle.entities_created) {
@@ -1701,9 +1706,9 @@ public:
                 entity_id_remap[old_id] = e.id();
                 tracked_entities.insert(e.id());
                 entity_names[e.id()] = name;
-                std::cout << "    Created entity " << name << ": old ID " << old_id << " -> new ID " << e.id() << "\n";
+                spdlog::debug("Created entity {}: old ID {} -> new ID {}", name, old_id, e.id());
             } else {
-                std::cerr << "Warning: Cannot create unnamed entity during roll forward\n";
+                spdlog::warn("Cannot create unnamed entity during roll forward");
             }
         }
 
@@ -1718,7 +1723,7 @@ public:
 
             flecs::entity e(world->get_world(), id);
             if (e.is_alive()) {
-                std::cout << "    Destroying entity: old ID " << old_id << " -> new ID " << id << "\n";
+                spdlog::debug("Destroying entity: old ID {} -> new ID {}", old_id, id);
                 e.destruct();
             }
             tracked_entities.erase(id);
@@ -1726,7 +1731,7 @@ public:
         }
 
         if (decompressed.empty() || decompressed.size() < sizeof(uint32_t)) {
-            std::cout << "  [DEBUG] Buffer is empty, but will apply relationships at end\n";
+            spdlog::debug("Buffer is empty, but will apply relationships at end");
             // Don't return here - fall through to relationship application
         } else {
 
@@ -1790,16 +1795,16 @@ public:
                 }
             }
         }
-        std::cout << "  [DEBUG] About to call defer_end for components\n";
+        spdlog::debug("About to call defer_end for components");
         world->defer_end();
-        std::cout << "  [DEBUG] defer_end completed\n";
+        spdlog::debug("defer_end completed");
         }  // end else block for decompressed buffer check
         }  // end else block for keyframe check
 
         // Apply relationship changes (for both keyframes and diff frames) - use already decoded relationships
-        std::cout << "  [DEBUG] About to apply relationships, count: " << relationships.size() << "\n";
+        spdlog::debug("About to apply relationships, count: {}", relationships.size());
         if (!relationships.empty()) {
-            std::cout << "    Applying " << relationships.size() << " relationship changes\n";
+            spdlog::info("Applying {} relationship changes", relationships.size());
         }
         world->defer_begin();
         for (const auto& rel_header : relationships) {
@@ -1830,9 +1835,9 @@ public:
                     const char* e_name = e.name();
                     const char* rel_name = rel.name();
                     const char* tgt_name = tgt.name();
-                    std::cout << "      Adding relationship: " << (e_name ? e_name : "unnamed") << " -["
-                             << (rel_name ? rel_name : "unnamed") << "]-> "
-                             << (tgt_name ? tgt_name : "unnamed") << "\n";
+                    spdlog::debug("Adding relationship: {} -[{}]-> {}",
+                        e_name ? e_name : "unnamed", rel_name ? rel_name : "unnamed",
+                        tgt_name ? tgt_name : "unnamed");
                 }
                 e.add(rel_header.relation, target_id);
             } else if (rel_header.op == ComponentOp::Remove) {
@@ -1841,9 +1846,9 @@ public:
                     const char* e_name = e.name();
                     const char* rel_name = rel.name();
                     const char* tgt_name = tgt.name();
-                    std::cout << "      Removing relationship: " << (e_name ? e_name : "unnamed") << " -["
-                             << (rel_name ? rel_name : "unnamed") << "]-> "
-                             << (tgt_name ? tgt_name : "unnamed") << "\n";
+                    spdlog::debug("Removing relationship: {} -[{}]-> {}",
+                        e_name ? e_name : "unnamed", rel_name ? rel_name : "unnamed",
+                        tgt_name ? tgt_name : "unnamed");
                 }
                 e.remove(rel_header.relation, target_id);
             }

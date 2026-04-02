@@ -3,10 +3,12 @@
 #include "state_history.h"
 #include <random>
 #include <cmath>
+#include <iostream>
 
 struct Attacking {};
 
 int main(int, char *[]) {
+    spdlog::set_level(spdlog::level::debug);
     flecs::world ecs;
 
     std::random_device rd;

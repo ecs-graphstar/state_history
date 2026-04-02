@@ -17,6 +17,7 @@ target_include_directories(project_settings INTERFACE
     "../snapshot/include"
     "../project_template_ui/deps/flecs/include"
     "../deps/zstd/lib"
+    "../deps/spdlog/include"
 )
 
 set(TEST_TARGETS

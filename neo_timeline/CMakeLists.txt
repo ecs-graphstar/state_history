@@ -41,6 +41,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "../project_template_ui/deps/nanovg/src"
     "../project_template_ui/deps/glad/include"
     "../deps/zstd/lib"
+    "../deps/spdlog/include"
 )
 
 target_link_libraries(${PROJECT_NAME}

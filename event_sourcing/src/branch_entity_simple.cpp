@@ -5,6 +5,7 @@
 #include <flecs.h>
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     std::cout << "=== Simple Branching History Test ===\n\n";
 
     flecs::world ecs;

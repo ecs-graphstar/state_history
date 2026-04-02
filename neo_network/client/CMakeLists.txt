@@ -57,6 +57,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "../../project_template_ui/deps/glad/include"
     "../../project_template_ui/deps/tracy/public"
     "../../deps/zstd/lib"
+    "../../deps/spdlog/include"
 )
 
 target_link_libraries(${PROJECT_NAME}

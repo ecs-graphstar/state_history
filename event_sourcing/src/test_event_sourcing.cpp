@@ -32,6 +32,7 @@ void assert_has_component(flecs::entity e, const char* comp_name, bool should_ha
 }
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     std::cout << "=== Event Sourcing Test Harness ===\n\n";
 
     flecs::world ecs;

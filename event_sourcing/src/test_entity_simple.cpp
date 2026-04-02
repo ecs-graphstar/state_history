@@ -4,6 +4,7 @@
 #include <iostream>
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     std::cout << "=== Simple Entity Test ===\n\n";
 
     flecs::world ecs;

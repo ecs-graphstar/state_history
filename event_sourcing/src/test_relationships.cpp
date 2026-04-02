@@ -31,6 +31,7 @@ void assert_has_relationship(flecs::entity e, flecs::entity_t rel, flecs::entity
 }
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     std::cout << "=== Relationship Tracking Test ===\n\n";
 
     flecs::world ecs;

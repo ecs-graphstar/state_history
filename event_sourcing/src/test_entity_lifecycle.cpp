@@ -26,6 +26,7 @@ void assert_entity_exists(flecs::world& ecs, const char* name, bool should_exist
 }
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     std::cout << "=== Entity Lifecycle Test Harness ===\n\n";
 
     flecs::world ecs;

@@ -9,6 +9,7 @@
 struct Attacking {};
 
 int main() {
+    spdlog::set_level(spdlog::level::debug);
     flecs::world ecs;
     StateHistory history(&ecs, 100, true);
     history.setup_observers();
