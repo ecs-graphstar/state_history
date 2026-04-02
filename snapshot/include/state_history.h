@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
-#include <zlib.h>
+#include <zstd.h>
 #include <future>
 #include <thread>
 #include <memory>
@@ -139,13 +139,12 @@ struct Snapshot {
         if (info.uncompressed_size == 0) return {};
 
         std::vector<uint8_t> decompressed(info.uncompressed_size);
-        uLongf dest_len = info.uncompressed_size;
 
-        int result = uncompress(decompressed.data(), &dest_len,
-                               buffer.data() + info.offset, info.size);
+        size_t const result = ZSTD_decompress(decompressed.data(), info.uncompressed_size,
+                                              buffer.data() + info.offset, info.size);
 
-        if (result != Z_OK) {
-            std::cerr << "Decompression failed with error: " << result << "\n";
+        if (ZSTD_isError(result)) {
+            std::cerr << "Decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
             return {};
         }
 
@@ -197,13 +196,12 @@ struct Snapshot {
         if (info.uncompressed_size == 0) return {};
 
         std::vector<uint8_t> decompressed(info.uncompressed_size);
-        uLongf dest_len = info.uncompressed_size;
 
-        int result = uncompress(decompressed.data(), &dest_len,
-                               buffer.data() + info.offset, info.size);
+        size_t const result = ZSTD_decompress(decompressed.data(), info.uncompressed_size,
+                                              buffer.data() + info.offset, info.size);
 
-        if (result != Z_OK) {
-            std::cerr << "Relationship decompression failed with error: " << result << "\n";
+        if (ZSTD_isError(result)) {
+            std::cerr << "Relationship decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
             return {};
         }
 
@@ -251,13 +249,12 @@ struct Snapshot {
         if (info.uncompressed_size == 0) return {};
 
         std::vector<uint8_t> decompressed(info.uncompressed_size);
-        uLongf dest_len = info.uncompressed_size;
 
-        int result = uncompress(decompressed.data(), &dest_len,
-                               buffer.data() + info.offset, info.size);
+        size_t const result = ZSTD_decompress(decompressed.data(), info.uncompressed_size,
+                                              buffer.data() + info.offset, info.size);
 
-        if (result != Z_OK) {
-            std::cerr << "Entity decompression failed with error: " << result << "\n";
+        if (ZSTD_isError(result)) {
+            std::cerr << "Entity decompression failed with error: " << ZSTD_getErrorName(result) << "\n";
             return {};
         }
 
@@ -667,18 +664,17 @@ public:
     std::vector<uint8_t> compress_buffer(const std::vector<uint8_t>& input) {
         if (input.empty()) return input;
 
-        uLongf compressed_size = compressBound(input.size());
-        std::vector<uint8_t> compressed(compressed_size);
+        size_t const dst_capacity = ZSTD_compressBound(input.size());
+        std::vector<uint8_t> compressed(dst_capacity);
 
-        int result = compress2(compressed.data(), &compressed_size,
-                              input.data(), input.size(),
-                              Z_BEST_SPEED);
+        size_t const result = ZSTD_compress(compressed.data(), dst_capacity,
+                                            input.data(), input.size(), 1);
 
-        if (result != Z_OK) {
+        if (ZSTD_isError(result)) {
             return input;
         }
 
-        compressed.resize(compressed_size);
+        compressed.resize(result);
         compressed.shrink_to_fit();
         return compressed;
     }

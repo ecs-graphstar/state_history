@@ -4,3 +4,6 @@
 [submodule "tradewinds"]
 	path = tradewinds
 	url = git@github.com:ecs-graphstar/tradewinds.git
+[submodule "deps/zstd"]
+	path = deps/zstd
+	url = https://github.com/facebook/zstd.git

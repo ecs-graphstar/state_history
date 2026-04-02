@@ -3,16 +3,20 @@ project(project)
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 add_subdirectory("../project_template_ui/deps/flecs" "deps/flecs")
-find_package(ZLIB REQUIRED)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory("../deps/zstd/build/cmake" "deps/zstd")
 
 add_library(project_settings INTERFACE)
 target_compile_features(project_settings INTERFACE cxx_std_17)
-target_link_libraries(project_settings INTERFACE flecs ZLIB::ZLIB)
+target_link_libraries(project_settings INTERFACE flecs libzstd_static)
 target_include_directories(project_settings INTERFACE
     "src"
     "include"
     "../snapshot/include"
     "../project_template_ui/deps/flecs/include"
+    "../deps/zstd/lib"
 )
 
 set(TEST_TARGETS

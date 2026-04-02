@@ -9,7 +9,10 @@ set(CMAKE_CXX_FLAGS_DEBUG "${COMMON_FLAGS} -g -O1")
 set(CMAKE_CXX_FLAGS_RELEASE "${COMMON_FLAGS} -O3")
 
 # --- Dependencies ---
-find_package(ZLIB REQUIRED)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory("../deps/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 add_subdirectory("../project_template_ui/deps/flecs" "${CMAKE_BINARY_DIR}/flecs")
@@ -30,13 +33,14 @@ target_compile_definitions(nanovg PUBLIC NANOVG_GL2_IMPLEMENTATION)
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 add_executable(${PROJECT_NAME} ${SOURCES})
 
-target_include_directories(${PROJECT_NAME} PRIVATE 
+target_include_directories(${PROJECT_NAME} PRIVATE
     "include"
     "../snapshot/include"
     "../project_template_ui/deps/flecs/include"
     "../project_template_ui/deps/glfw/include"
     "../project_template_ui/deps/nanovg/src"
     "../project_template_ui/deps/glad/include"
+    "../deps/zstd/lib"
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -45,7 +49,7 @@ target_link_libraries(${PROJECT_NAME}
     glfw
     glad
     nanovg
-    ZLIB::ZLIB
+    libzstd_static
     ${CMAKE_DL_LIBS}
 )
 
