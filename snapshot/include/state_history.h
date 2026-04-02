@@ -1368,7 +1368,7 @@ public:
         entity_events.clear();
     }
 
-    void roll_to(size_t target_frame) 
+    void roll_to(size_t target_frame)
     {
         if (current_frame < target_frame)
         {
@@ -1379,6 +1379,37 @@ public:
         }
     }
 
+    // Efficiently advance world state by one frame during sequential scanning.
+    // Precondition: world state is consistent at current_frame - 1 (e.g. after
+    // rollback_to or a previous step_forward call).
+    // Unlike roll_forward, this applies only the single next delta without
+    // rebuilding from the nearest keyframe. At keyframe boundaries it does a
+    // full clear+restore for correctness (only 1/keyframe_interval of frames).
+    // Returns false when there are no more frames.
+    bool step_forward() {
+        if (current_frame >= snapshots.size()) return false;
+
+        recording_enabled = false;
+
+        auto& snapshot = snapshots[current_frame];
+
+        if (snapshot.is_keyframe()) {
+            // Full restoration at keyframe boundaries for correctness
+            clear_all_components();
+            restore_entities_from_keyframe(current_frame);
+            restore_keyframe(current_frame);
+        } else {
+            // Apply only this frame's delta — the core speedup
+            apply_snapshot_forward(snapshot);
+        }
+
+        current_frame++;
+        recording_enabled = true;
+        frame_events.clear();
+        entity_events.clear();
+
+        return true;
+    }
 
     void restore_entities_from_keyframe(size_t frame_idx) {
         if (!snapshots[frame_idx].is_keyframe()) {

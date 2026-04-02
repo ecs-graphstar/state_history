@@ -26,6 +26,7 @@ set(TEST_TARGETS
     test_entity_lifecycle
     test_entity_simple
     test_relationships
+    test_step_forward
     test_track_entity_order
 )
 

@@ -776,7 +776,7 @@ int main(int, char *[]) {
         for (int frame = resim_state.current_frame; frame < end_frame; frame++) {
             // Apply this frame's state
             if (frame > 0) {
-                history.roll_forward(frame);
+                history.step_forward();
             }
 
             // Check query: any entity with food_type_a NearBy any entity with food_type_b
