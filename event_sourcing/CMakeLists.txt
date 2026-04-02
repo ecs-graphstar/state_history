@@ -25,11 +25,11 @@ set(TEST_TARGETS
 )
 
 # Main Library
-add_executable(${PROJECT_NAME} src/main.cpp src/components.cpp)
+add_executable(${PROJECT_NAME} src/main.cpp src/components.cpp ../snapshot/source/state_history.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE project_settings)
 
 # Tests
 foreach(TGT IN LISTS TEST_TARGETS)
-    add_executable(${TGT} src/${TGT}.cpp src/components.cpp)
+    add_executable(${TGT} src/${TGT}.cpp src/components.cpp ../snapshot/source/state_history.cpp)
     target_link_libraries(${TGT} PRIVATE project_settings)
 endforeach()

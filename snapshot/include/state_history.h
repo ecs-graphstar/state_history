@@ -139,17 +139,57 @@ struct Snapshot {
   EntityLifecycle decode_entities() const;
 };
 
-// Helper to get component size
+// Helper to get component size and serialization handlers
+#include <functional>
+#include "serialize.h"
+
 struct ComponentRegistry {
   std::unordered_map<flecs::entity_t, size_t> component_sizes;
+  std::unordered_map<flecs::entity_t, std::function<std::vector<uint8_t>(const void*)>> serializers;
+  std::unordered_map<flecs::entity_t, std::function<void(void*, const std::vector<uint8_t>&)>> deserializers;
 
-  void register_component(flecs::entity_t id, size_t size) {
-    component_sizes[id] = size;
+  template <typename T>
+  void register_component(flecs::entity_t id) {
+    component_sizes[id] = sizeof(T);
+    serializers[id] = [](const void* data) -> std::vector<uint8_t> {
+      T* typed_data = (T*)const_cast<void*>(data);
+      serialize::MeasureStream measureStream;
+      typed_data->Serialize(measureStream);
+      int size = measureStream.GetBytesProcessed();
+
+      std::vector<uint8_t> buffer(size);
+      serialize::WriteStream writeStream(buffer.data(), size);
+      typed_data->Serialize(writeStream);
+      writeStream.Flush();
+      return buffer;
+    };
+    deserializers[id] = [](void* data, const std::vector<uint8_t>& buffer) {
+      if (buffer.empty()) return;
+      T* typed_data = static_cast<T*>(data);
+      serialize::ReadStream readStream(buffer.data(), buffer.size());
+      typed_data->Serialize(readStream);
+    };
   }
 
   size_t get_size(flecs::entity_t id) const {
     auto it = component_sizes.find(id);
     return it != component_sizes.end() ? it->second : 0;
+  }
+
+  std::vector<uint8_t> serialize(flecs::entity_t id, const void* data) const {
+    if (!data) return {};
+    auto it = serializers.find(id);
+    if (it != serializers.end()) {
+      return it->second(data);
+    }
+    return {};
+  }
+
+  void deserialize(flecs::entity_t id, void* data, const std::vector<uint8_t>& buffer) const {
+    auto it = deserializers.find(id);
+    if (it != deserializers.end()) {
+      it->second(data, buffer);
+    }
   }
 };
 
@@ -221,6 +261,25 @@ public:
         enable_compression(compress), current_frame(0),
         recording_enabled(true) {}
 
+  std::vector<ecs_entity_t> add_observers;
+  std::vector<ecs_entity_t> remove_observers;
+  std::vector<ecs_entity_t> set_observers;
+  ecs_entity_t wildcard_add_observer = 0;
+  ecs_entity_t wildcard_remove_observer = 0;
+  ecs_entity_t wildcard_rel_add_observer = 0;
+  ecs_entity_t wildcard_rel_remove_observer = 0;
+
+  ~StateHistory() {
+      for (ecs_entity_t id : add_observers) ecs_delete(world->c_ptr(), id);
+      for (ecs_entity_t id : remove_observers) ecs_delete(world->c_ptr(), id);
+      for (ecs_entity_t id : set_observers) ecs_delete(world->c_ptr(), id);
+      if (wildcard_add_observer) ecs_delete(world->c_ptr(), wildcard_add_observer);
+      if (wildcard_remove_observer) ecs_delete(world->c_ptr(), wildcard_remove_observer);
+      if (wildcard_rel_add_observer) ecs_delete(world->c_ptr(), wildcard_rel_add_observer);
+      if (wildcard_rel_remove_observer) ecs_delete(world->c_ptr(), wildcard_rel_remove_observer);
+      unregister_all_components();
+  }
+
   // Call this for each component type before calling setup_observers().
   template <typename T> void register_component() {
     flecs::entity_t id = world->component<T>().id();
@@ -231,14 +290,26 @@ public:
                   id) == tracked_component_ids.end()) {
       tracked_component_ids.push_back(id);
       tracked_component_sizes.push_back(size);
-      registry.register_component(id, size);
+      registry.register_component<T>(id);
     }
+  }
+
+  void unregister_all_components() {
+    tracked_component_ids.clear();
+    tracked_component_sizes.clear();
+    registry.component_sizes.clear();
+    registry.serializers.clear();
+    registry.deserializers.clear();
   }
 
   void setup_observers();
 
   void record_event(flecs::entity_t entity, flecs::entity_t component,
                     ComponentOp op);
+
+  // Default copy and move operations are not safe with Flecs observers.
+  StateHistory(const StateHistory&) = delete;
+  StateHistory& operator=(const StateHistory&) = delete;
 
   void record_relationship(flecs::entity_t entity, flecs::entity_t relation,
                            flecs::entity_t target, ComponentOp op);

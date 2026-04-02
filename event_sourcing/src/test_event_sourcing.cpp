@@ -36,12 +36,14 @@ int main() {
 
     flecs::world ecs;
     StateHistory history(&ecs, 5, false);  // Keyframe every 5 frames, no compression
+    register_all_components(history);
     history.setup_observers();
 
     std::cout << "Test 1: Component Add Operations\n";
     std::cout << "----------------------------------\n";
 
     auto e1 = ecs.entity("TestEntity1");
+    history.track_entity(e1);
     history.capture_state();  // Frame 0 (keyframe) - empty state
 
     std::cout << "Frame 1: Adding Position component\n";

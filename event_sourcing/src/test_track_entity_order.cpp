@@ -11,6 +11,7 @@ struct Attacking {};
 int main() {
     flecs::world ecs;
     StateHistory history(&ecs, 100, true);
+    register_all_components(history);
     history.setup_observers();
 
     auto DynamicRel = ecs.entity("DynamicRel");

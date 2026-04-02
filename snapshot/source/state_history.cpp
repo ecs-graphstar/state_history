@@ -138,7 +138,7 @@ std::vector<RelationshipHeader> Snapshot::decode_relationships() const {
   flecs::entity_t prev_entity = 0;
 
   for (uint32_t i = 0; i < count && offset + sizeof(RelationshipHeader) <= buffer.size(); ++i) {
-    RelationshipHeader header;
+    RelationshipHeader header = {};
     std::memcpy(&header, buffer.data() + offset, sizeof(RelationshipHeader));
 
     // Decode delta-encoded entity ID
@@ -253,7 +253,7 @@ void StateHistory::setup_observers() {
       }
     };
     add_desc.ctx = this;
-    ecs_observer_init(world->c_ptr(), &add_desc);
+    add_observers.push_back(ecs_observer_init(world->c_ptr(), &add_desc));
 
     // OnRemove observer
     ecs_observer_desc_t remove_desc = {};
@@ -267,7 +267,7 @@ void StateHistory::setup_observers() {
       }
     };
     remove_desc.ctx = this;
-    ecs_observer_init(world->c_ptr(), &remove_desc);
+    remove_observers.push_back(ecs_observer_init(world->c_ptr(), &remove_desc));
 
     // OnSet observer
     ecs_observer_desc_t set_desc = {};
@@ -281,11 +281,11 @@ void StateHistory::setup_observers() {
       }
     };
     set_desc.ctx = this;
-    ecs_observer_init(world->c_ptr(), &set_desc);
+    set_observers.push_back(ecs_observer_init(world->c_ptr(), &set_desc));
   }
   // Track all tag/component additions using wildcard (single wildcard for
   // non-pair components)
-  world->observer().with(flecs::Wildcard).event(flecs::OnAdd).each([this](flecs::iter& it, size_t index) {
+  wildcard_add_observer = world->observer().with(flecs::Wildcard).event(flecs::OnAdd).each([this](flecs::iter& it, size_t index) {
     auto e = it.entity(index);
     auto id = it.id(0);
 
@@ -314,10 +314,10 @@ void StateHistory::setup_observers() {
 
     // Record as a tag (component with size 0)
     record_event(e.id(), component_id, ComponentOp::Add);
-  });
+  }).id();
 
   // Track all tag/component removals using wildcard
-  world->observer().with(flecs::Wildcard).event(flecs::OnRemove).each([this](flecs::iter& it, size_t index) {
+  wildcard_remove_observer = world->observer().with(flecs::Wildcard).event(flecs::OnRemove).each([this](flecs::iter& it, size_t index) {
     auto e = it.entity(index);
     auto id = it.id(0);
 
@@ -346,10 +346,10 @@ void StateHistory::setup_observers() {
 
     // Record as a tag removal
     record_event(e.id(), component_id, ComponentOp::Remove);
-  });
+  }).id();
 
   // Track all relationship additions using wildcards
-  world->observer()
+  wildcard_rel_add_observer = world->observer()
       .with(flecs::Wildcard, flecs::Wildcard)
       .event(flecs::OnAdd)
       .each([this](flecs::iter& it, size_t index) {
@@ -358,10 +358,10 @@ void StateHistory::setup_observers() {
         auto rel = pair.first();
         auto tgt = pair.second();
         record_relationship(e.id(), rel, tgt, ComponentOp::Add);
-      });
+      }).id();
 
   // Track all relationship removals using wildcards
-  world->observer()
+  wildcard_rel_remove_observer = world->observer()
       .with(flecs::Wildcard, flecs::Wildcard)
       .event(flecs::OnRemove)
       .each([this](flecs::iter& it, size_t index) {
@@ -370,7 +370,7 @@ void StateHistory::setup_observers() {
         auto rel = pair.first();
         auto tgt = pair.second();
         record_relationship(e.id(), rel, tgt, ComponentOp::Remove);
-      });
+      }).id();
 }
 void StateHistory::record_event(flecs::entity_t entity, flecs::entity_t component, ComponentOp op) {
   if (recording_enabled) {
@@ -831,7 +831,7 @@ StateHistory::SectionData StateHistory::capture_all_relationships() {
       }
 
       // Add relationship to snapshot
-      RelationshipHeader header;
+      RelationshipHeader header = {};
       header.entity = entity_id;
       header.relation = rel.id();
       header.target = tgt.id();
@@ -849,7 +849,7 @@ StateHistory::SectionData StateHistory::capture_changed_relationships() {
   std::vector<RelationshipHeader> relationships;
 
   for (const auto& event : relationship_events) {
-    RelationshipHeader header;
+    RelationshipHeader header = {};
     header.entity = event.entity;
     header.relation = event.relation;
     header.target = event.target;
@@ -961,10 +961,15 @@ void StateHistory::capture_component_op(std::vector<ComponentHeader>& headers,
                                         const void* data,
                                         size_t size,
                                         ComponentOp op) {
-  ComponentHeader header;
+  std::vector<uint8_t> serialized_data;
+  if (data && size > 0) {
+    serialized_data = registry.serialize(component, data);
+  }
+
+  ComponentHeader header = {};
   header.entity = entity;
   header.component = component;
-  header.size = static_cast<uint16_t>(size);
+  header.size = static_cast<uint16_t>(serialized_data.size());
   header.offset = static_cast<uint16_t>(data_section.size());
   header.op = op;
 
@@ -972,14 +977,11 @@ void StateHistory::capture_component_op(std::vector<ComponentHeader>& headers,
 
   // Store data for Add and Set operations (not for Remove)
   if (data && size > 0) {
-    const uint8_t* curr = static_cast<const uint8_t*>(data);
-    data_section.insert(data_section.end(), curr, curr + size);
+    data_section.insert(data_section.end(), serialized_data.begin(), serialized_data.end());
 
     // Update previous state for Add/Set operations
     auto comp_key = make_key(entity, component);
-    auto& prev = prev_frame_state[comp_key];
-    prev.resize(size);
-    std::memcpy(prev.data(), curr, size);
+    prev_frame_state[comp_key] = serialized_data;
   } else if (op == ComponentOp::Remove) {
     // Remove from previous state cache
     auto comp_key = make_key(entity, component);
@@ -993,26 +995,25 @@ void StateHistory::capture_component_diff(std::vector<ComponentHeader>& headers,
                                           const void* data,
                                           size_t size) {
   auto comp_key = make_key(entity_id, component_id);
-  const uint8_t* curr = static_cast<const uint8_t*>(data);
+  std::vector<uint8_t> serialized_data = registry.serialize(component_id, data);
 
   auto it = prev_frame_state.find(comp_key);
-  if (it == prev_frame_state.end()) {
-    // Component not in cache - this shouldn't happen with proper OnSet handling
+  if (it == prev_frame_state.end() || it->second.size() != serialized_data.size()) {
+    // Component not in cache or size changed - this shouldn't happen with proper OnSet handling,
+    // or if the component size dynamically changed (though standard components don't).
     // Store as full data with Set operation
-    ComponentHeader header;
+    ComponentHeader header = {};
     header.entity = entity_id;
     header.component = component_id;
-    header.size = static_cast<uint16_t>(size);
+    header.size = static_cast<uint16_t>(serialized_data.size());
     header.offset = static_cast<uint16_t>(data_section.size());
     header.op = ComponentOp::Set;
 
     headers.push_back(header);
-    data_section.insert(data_section.end(), curr, curr + size);
+    data_section.insert(data_section.end(), serialized_data.begin(), serialized_data.end());
 
     // Initialize previous state
-    auto& prev = prev_frame_state[comp_key];
-    prev.resize(size);
-    std::memcpy(prev.data(), curr, size);
+    prev_frame_state[comp_key] = serialized_data;
     return;
   }
 
@@ -1020,30 +1021,30 @@ void StateHistory::capture_component_diff(std::vector<ComponentHeader>& headers,
 
   // Calculate XOR diff
   bool has_changes = false;
-  for (size_t i = 0; i < size; ++i) {
-    if (curr[i] != prev[i]) {
+  for (size_t i = 0; i < serialized_data.size(); ++i) {
+    if (serialized_data[i] != prev[i]) {
       has_changes = true;
       break;
     }
   }
 
   if (has_changes) {
-    ComponentHeader header;
+    ComponentHeader header = {};
     header.entity = entity_id;
     header.component = component_id;
-    header.size = static_cast<uint16_t>(size);
+    header.size = static_cast<uint16_t>(serialized_data.size());
     header.offset = static_cast<uint16_t>(data_section.size());
     header.op = ComponentOp::Set;
 
     headers.push_back(header);
 
     // Store XOR diff
-    for (size_t i = 0; i < size; ++i) {
-      data_section.push_back(curr[i] ^ prev[i]);
+    for (size_t i = 0; i < serialized_data.size(); ++i) {
+      data_section.push_back(serialized_data[i] ^ prev[i]);
     }
 
     // Update previous state
-    std::memcpy(prev_frame_state[comp_key].data(), curr, size);
+    prev_frame_state[comp_key] = serialized_data;
   }
 }
 void StateHistory::rollback_to(size_t target_frame) {
@@ -1063,6 +1064,7 @@ void StateHistory::rollback_to(size_t target_frame) {
 
   // Clear all tracked components from entities before restore
   clear_all_components();
+  prev_frame_state.clear();
 
   // Restore entities from keyframe (destroys/recreates as needed)
   restore_entities_from_keyframe(keyframe_idx);
@@ -1085,6 +1087,7 @@ void StateHistory::rollback_to(size_t target_frame) {
   rebuild_prev_frame_state();
   frame_events.clear();
   entity_events.clear();
+  relationship_events.clear();
 }
 void StateHistory::roll_forward(size_t target_frame) {
   if (target_frame >= snapshots.size()) {
@@ -1109,6 +1112,7 @@ void StateHistory::roll_forward(size_t target_frame) {
 
   // Clear all tracked components from entities before restore
   clear_all_components();
+  prev_frame_state.clear();
 
   // Restore entities from keyframe (destroys/recreates as needed)
   restore_entities_from_keyframe(keyframe_idx);
@@ -1132,6 +1136,7 @@ void StateHistory::roll_forward(size_t target_frame) {
   rebuild_prev_frame_state();
   frame_events.clear();
   entity_events.clear();
+  relationship_events.clear();
 }
 void StateHistory::roll_to(size_t target_frame) {
   if (current_frame < target_frame) {
@@ -1389,10 +1394,14 @@ void StateHistory::restore_keyframe(size_t frame_idx) {
     }
 
     // Restore component using C API
-    void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, header->size);
+    size_t comp_size = registry.get_size(header->component);
+    void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
     if (comp) {
-      std::memcpy(comp, data, header->size);
+      std::vector<uint8_t> buffer(data, data + header->size);
+      registry.deserialize(header->component, comp, buffer);
       ecs_modified_id(world->c_ptr(), entity_id, header->component);
+      auto comp_key = make_key(entity_id, header->component);
+      prev_frame_state[comp_key] = buffer;
     }
   }
   world->defer_end();
@@ -1539,29 +1548,43 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
         }
 
         // Handle operation based on type using C API
+        size_t comp_size = registry.get_size(header->component);
         if (header->op == ComponentOp::Add) {
           // Add component with data
           const uint8_t* data = snapshot.get_data(header, decompressed);
           if (data) {
-            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, header->size);
+            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
             if (comp) {
-              std::memcpy(comp, data, header->size);
+              std::vector<uint8_t> buffer(data, data + header->size);
+              registry.deserialize(header->component, comp, buffer);
               ecs_modified_id(world->c_ptr(), entity_id, header->component);
+              auto comp_key = make_key(entity_id, header->component);
+              prev_frame_state[comp_key] = buffer;
             }
           }
         } else if (header->op == ComponentOp::Remove) {
           // Remove component
           ecs_remove_id(world->c_ptr(), entity_id, header->component);
+          auto comp_key = make_key(entity_id, header->component);
+          prev_frame_state.erase(comp_key);
         } else if (header->op == ComponentOp::Set) {
           // Apply XOR diff
           const uint8_t* diff_data = snapshot.get_data(header, decompressed);
           if (diff_data) {
-            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, header->size);
+            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
             if (comp) {
-              uint8_t* bytes = static_cast<uint8_t*>(comp);
-              for (size_t j = 0; j < header->size; ++j) {
-                bytes[j] ^= diff_data[j];
+              auto comp_key = make_key(entity_id, header->component);
+              auto& prev = prev_frame_state[comp_key];
+
+              if (prev.size() != header->size) {
+                prev.resize(header->size);
               }
+
+              for (size_t j = 0; j < header->size; ++j) {
+                prev[j] ^= diff_data[j];
+              }
+
+              registry.deserialize(header->component, comp, prev);
               ecs_modified_id(world->c_ptr(), entity_id, header->component);
             }
           }
@@ -1646,12 +1669,14 @@ void StateHistory::rebuild_prev_frame_state() {
       void* comp_array = ecs_field_w_size(&it, comp_size, 0);
       for (int j = 0; j < it.count; j++) {
         ecs_entity_t entity = it.entities[j];
-        void* comp_data = static_cast<uint8_t*>(comp_array) + (j * comp_size);
+        // Ensure entity is tracked before caching component
+        if (tracked_entities.find(entity) != tracked_entities.end()) {
+            void* comp_data = static_cast<uint8_t*>(comp_array) + (j * comp_size);
 
-        auto comp_key = make_key(entity, comp_id);
-        auto& prev = prev_frame_state[comp_key];
-        prev.resize(comp_size);
-        std::memcpy(prev.data(), comp_data, comp_size);
+            auto comp_key = make_key(entity, comp_id);
+            std::vector<uint8_t> serialized_data = registry.serialize(comp_id, comp_data);
+            prev_frame_state[comp_key] = serialized_data;
+        }
       }
     }
     ecs_query_fini(query);
