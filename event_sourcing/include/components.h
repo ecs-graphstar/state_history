@@ -1,7 +1,9 @@
 #pragma once
 
 class StateHistory;
+class TimelineTree;
 void register_all_components(StateHistory& history);
+void register_all_components(TimelineTree& tree);
 
 struct Position {
     double x, y;

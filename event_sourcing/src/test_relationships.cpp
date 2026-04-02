@@ -36,6 +36,7 @@ int main() {
     flecs::world ecs;
     StateHistory history(&ecs, 5, false);  // Keyframe every 5 frames, no compression
     history.setup_observers();
+    register_all_components(history);
 
     // Register relationship types
     ecs.component<Likes>();

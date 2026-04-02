@@ -13,6 +13,7 @@
 #include <zlib.h>
 #include <future>
 #include <thread>
+#include <memory>
 
 // NOTE: Component structs must be defined before including this header
 
@@ -369,6 +370,38 @@ struct EntityEvent {
     std::string name;  // Store entity name for recreation
 };
 
+struct FlecsInternalFilter {
+    ecs_entity_t flecs_module_id;
+    ecs_entity_t identifier_id;
+
+    FlecsInternalFilter() : flecs_module_id(0), identifier_id(0) {}
+
+    void init(flecs::world* world) {
+        flecs_module_id = world->lookup("flecs").id();
+        identifier_id = world->lookup("Identifier").id();
+    }
+
+    bool is_internal_component(ecs_entity_t component_id) const {
+        return component_id == flecs_module_id ||
+               component_id == identifier_id ||
+               component_id == EcsObserver ||
+               component_id == EcsQuery ||
+               component_id == EcsSystem ||
+               component_id == flecs::ChildOf ||
+               component_id == EcsDependsOn;
+    }
+
+    bool is_internal_relationship(ecs_entity_t entity, ecs_entity_t relation, ecs_entity_t target) const {
+        return relation == flecs::ChildOf ||
+               entity == flecs_module_id ||
+               relation == identifier_id ||
+               target == EcsObserver ||
+               target == EcsQuery ||
+               target == EcsSystem ||
+               relation == EcsDependsOn;
+    }
+};
+
 class StateHistory {
 public:
     flecs::world* world;
@@ -406,8 +439,12 @@ public:
     // Component registry for sizes
     ComponentRegistry registry;
 
+    // Cached flecs internal ID filter
+    FlecsInternalFilter internal_filter;
+
     StateHistory(flecs::world* w, size_t keyframe_every = 60, bool compress = true)
         : world(w), keyframe_interval(keyframe_every), enable_compression(compress), current_frame(0), recording_enabled(true) {
+        internal_filter.init(world);
     }
 
     // Call this for each component type before calling setup_observers().
@@ -415,12 +452,14 @@ public:
     void register_component() {
         flecs::entity_t id = world->component<T>().id();
         size_t size = sizeof(T);
-        
-        // Avoid duplicate registration
+
+        // Always update registry (needed when tracked_component_ids is copied from another history)
+        registry.register_component(id, size);
+
+        // Avoid duplicate in tracked lists
         if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), id) == tracked_component_ids.end()) {
             tracked_component_ids.push_back(id);
             tracked_component_sizes.push_back(size);
-            registry.register_component(id, size);
         }
     }
 
@@ -490,16 +529,7 @@ public:
                 }
 
                 // Filter out flecs internal components
-                auto flecs_module = world->lookup("flecs");
-                auto identifier = world->lookup("Identifier");
-
-                if (component_id == flecs_module.id() ||
-                    component_id == identifier.id() ||
-                    component_id == EcsObserver ||
-                    component_id == EcsQuery ||
-                    component_id == EcsSystem ||
-                    component_id == flecs::ChildOf ||
-                    component_id == EcsDependsOn) {
+                if (internal_filter.is_internal_component(component_id)) {
                     return;
                 }
 
@@ -528,16 +558,7 @@ public:
                 }
 
                 // Filter out flecs internal components
-                auto flecs_module = world->lookup("flecs");
-                auto identifier = world->lookup("Identifier");
-
-                if (component_id == flecs_module.id() ||
-                    component_id == identifier.id() ||
-                    component_id == EcsObserver ||
-                    component_id == EcsQuery ||
-                    component_id == EcsSystem ||
-                    component_id == flecs::ChildOf ||
-                    component_id == EcsDependsOn) {
+                if (internal_filter.is_internal_component(component_id)) {
                     return;
                 }
 
@@ -584,26 +605,7 @@ public:
             }
 
             // Filter out flecs internal relationships
-            // Skip ChildOf relationships
-            if (relation == flecs::ChildOf) {
-                return;
-            }
-
-            // Get flecs module and other internal entities
-            auto flecs_module = world->lookup("flecs");
-            auto identifier = world->lookup("Identifier");
-
-            // Skip if any of these flecs-native conditions are true:
-            // - Source is EcsFlecs
-            // - Relation is Identifier
-            // - Target is EcsObserver, EcsQuery, or EcsSystem
-            // - Relation is EcsDependsOn
-            if (entity == flecs_module.id() ||
-                relation == identifier.id() ||
-                target == EcsObserver ||
-                target == EcsQuery ||
-                target == EcsSystem ||
-                relation == EcsDependsOn) {
+            if (internal_filter.is_internal_relationship(entity, relation, target)) {
                 return;
             }
 
@@ -632,25 +634,13 @@ public:
             // Capture any existing relationships that were added before tracking
             // This fixes the bug where relationships added before track_entity() aren't recorded
             if (recording_enabled) {
-                auto flecs_module = world->lookup("flecs");
-                auto identifier = world->lookup("Identifier");
-
                 e.each([&](flecs::id rel_id) {
                     if (rel_id.is_pair()) {
                         auto rel = rel_id.first();
                         auto tgt = rel_id.second();
 
                         // Apply same filters as record_relationship
-                        if (rel == flecs::ChildOf) {
-                            return;
-                        }
-
-                        if (id == flecs_module.id() ||
-                            rel == identifier.id() ||
-                            tgt == EcsObserver ||
-                            tgt == EcsQuery ||
-                            tgt == EcsSystem ||
-                            rel == EcsDependsOn) {
+                        if (internal_filter.is_internal_relationship(id, rel, tgt)) {
                             return;
                         }
 
@@ -1011,16 +1001,7 @@ public:
                 }
 
                 // Filter out flecs internal components
-                auto flecs_module = world->lookup("flecs");
-                auto identifier = world->lookup("Identifier");
-
-                if (component_id == flecs_module.id() ||
-                    component_id == identifier.id() ||
-                    component_id == EcsObserver ||
-                    component_id == EcsQuery ||
-                    component_id == EcsSystem ||
-                    component_id == flecs::ChildOf ||
-                    component_id == EcsDependsOn) {
+                if (internal_filter.is_internal_component(component_id)) {
                     return;
                 }
 
@@ -1033,9 +1014,6 @@ public:
 
     SectionData capture_all_relationships() {
         // For keyframes, capture relationships only on tracked entities
-        auto flecs_module = world->lookup("flecs");
-        auto identifier = world->lookup("Identifier");
-
         std::vector<RelationshipHeader> relationships;
 
         // Sort tracked entities for better delta encoding
@@ -1056,22 +1034,8 @@ public:
                 auto rel = id.first();
                 auto tgt = id.second();
 
-                // Skip ChildOf relationships
-                if (rel == flecs::ChildOf) {
-                    return;
-                }
-
-                // Skip if any of these flecs-native conditions are true:
-                // - Source is EcsFlecs
-                // - Relation is Identifier
-                // - Target is EcsObserver, EcsQuery, or EcsSystem
-                // - Relation is EcsDependsOn
-                if (entity_id == flecs_module.id() ||
-                    rel == identifier.id() ||
-                    tgt == EcsObserver ||
-                    tgt == EcsQuery ||
-                    tgt == EcsSystem ||
-                    rel == EcsDependsOn) {
+                // Skip flecs internal relationships
+                if (internal_filter.is_internal_relationship(entity_id, rel, tgt)) {
                     return;
                 }
 
@@ -1519,16 +1483,7 @@ public:
                 }
 
                 // Filter out flecs internal components
-                auto flecs_module = world->lookup("flecs");
-                auto identifier = world->lookup("Identifier");
-
-                if (component_id == flecs_module.id() ||
-                    component_id == identifier.id() ||
-                    component_id == EcsObserver ||
-                    component_id == EcsQuery ||
-                    component_id == EcsSystem ||
-                    component_id == flecs::ChildOf ||
-                    component_id == EcsDependsOn) {
+                if (internal_filter.is_internal_component(component_id)) {
                     return;
                 }
 
@@ -1549,9 +1504,6 @@ public:
 
     void clear_all_relationships() {
         // Remove all tracked relationships only from tracked entities
-        auto flecs_module = world->lookup("flecs");
-        auto identifier = world->lookup("Identifier");
-
         world->defer_begin();
         for (flecs::entity_t entity_id : tracked_entities) {
             flecs::entity e(world->get_world(), entity_id);
@@ -1569,18 +1521,8 @@ public:
                 auto rel = id.first();
                 auto tgt = id.second();
 
-                // Skip ChildOf relationships
-                if (rel == flecs::ChildOf) {
-                    return;
-                }
-
-                // Skip if any of these flecs-native conditions are true
-                if (entity_id == flecs_module.id() ||
-                    rel == identifier.id() ||
-                    tgt == EcsObserver ||
-                    tgt == EcsQuery ||
-                    tgt == EcsSystem ||
-                    rel == EcsDependsOn) {
+                // Skip flecs internal relationships
+                if (internal_filter.is_internal_relationship(entity_id, rel, tgt)) {
                     return;
                 }
 
@@ -1635,50 +1577,48 @@ public:
             relationships = snapshot.decode_relationships();
         }
 
-        if (decompressed.empty() || decompressed.size() < sizeof(uint32_t)) {
-            return;
+        if (!decompressed.empty() && decompressed.size() >= sizeof(uint32_t)) {
+            uint32_t count;
+            std::memcpy(&count, decompressed.data(), sizeof(uint32_t));
+
+            world->defer_begin();
+            for (size_t i = 0; i < count; ++i) {
+                const ComponentHeader* header = snapshot.get_header(i, decompressed);
+                if (!header) continue;
+
+                // Keyframes should only contain Add operations
+                if (header->op != ComponentOp::Add) {
+                    std::cerr << "Warning: Non-Add operation in keyframe!\n";
+                    continue;
+                }
+
+                const uint8_t* data = snapshot.get_data(header, decompressed);
+                if (!data) continue;
+
+                // Remap entity ID if needed
+                flecs::entity_t entity_id = header->entity;
+                if (entity_id_remap.count(entity_id)) {
+                    entity_id = entity_id_remap[entity_id];
+                }
+
+                flecs::entity e(world->get_world(), entity_id);
+
+                // Check if this is a tag (size 0)
+                if (header->size == 0) {
+                    // This is a tag - just add it using C API
+                    ecs_add_id(world->c_ptr(), entity_id, header->component);
+                    continue;
+                }
+
+                // Restore component using C API
+                void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, header->size);
+                if (comp) {
+                    std::memcpy(comp, data, header->size);
+                    ecs_modified_id(world->c_ptr(), entity_id, header->component);
+                }
+            }
+            world->defer_end();
         }
-
-        uint32_t count;
-        std::memcpy(&count, decompressed.data(), sizeof(uint32_t));
-
-        world->defer_begin();
-        for (size_t i = 0; i < count; ++i) {
-            const ComponentHeader* header = snapshot.get_header(i, decompressed);
-            if (!header) continue;
-
-            // Keyframes should only contain Add operations
-            if (header->op != ComponentOp::Add) {
-                std::cerr << "Warning: Non-Add operation in keyframe!\n";
-                continue;
-            }
-
-            const uint8_t* data = snapshot.get_data(header, decompressed);
-            if (!data) continue;
-
-            // Remap entity ID if needed
-            flecs::entity_t entity_id = header->entity;
-            if (entity_id_remap.count(entity_id)) {
-                entity_id = entity_id_remap[entity_id];
-            }
-
-            flecs::entity e(world->get_world(), entity_id);
-
-            // Check if this is a tag (size 0)
-            if (header->size == 0) {
-                // This is a tag - just add it using C API
-                ecs_add_id(world->c_ptr(), entity_id, header->component);
-                continue;
-            }
-
-            // Restore component using C API
-            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, header->size);
-            if (comp) {
-                std::memcpy(comp, data, header->size);
-                ecs_modified_id(world->c_ptr(), entity_id, header->component);
-            }
-        }
-        world->defer_end();
 
         // Restore relationships
         world->defer_begin();
@@ -2035,12 +1975,10 @@ public:
     }
 };
 
-// TODO: Migrate compression to TimelineHistory?
-// If there are lots of branches, then each of those branches essentially become
 struct TimelineNode
 {
     StateHistory* history;
-    uint32_t branch_frame; // The frame of the StateHistory at which this timeline diverges...
+    uint32_t branch_frame;
     TimelineNode* parent;
     std::vector<TimelineNode*> children;
 };
@@ -2048,28 +1986,250 @@ struct TimelineNode
 class TimelineTree
 {
 public:
-    TimelineNode* root_timeline;
-    // Do we need to store an active timeline?
-    // TimelineNode* active_timeline;
-    size_t active_frame;
+    // RAII ownership
+    std::vector<std::unique_ptr<TimelineNode>> nodes_;
+    std::vector<std::unique_ptr<StateHistory>> histories_;
 
-    void roll_to(TimelineNode* node, size_t target_frame)
-    {   
-        if (node->parent == nullptr) // root node
-        {
-            node->history->roll_to(target_frame);
+    // The node whose history currently receives observer events
+    TimelineNode* active_node;
+
+    // Shared world pointer
+    flecs::world* world;
+
+    // Component registration data (copied to branches)
+    std::vector<ecs_entity_t> tracked_component_ids;
+    std::vector<size_t> tracked_component_sizes;
+    ComponentRegistry registry;
+
+    // Observer entities created by setup_observers (for cleanup)
+    std::vector<ecs_entity_t> observer_entities_;
+
+    // Cached flecs internal ID filter
+    FlecsInternalFilter internal_filter;
+
+    // Construction parameters for branch histories
+    size_t keyframe_interval_;
+    bool enable_compression_;
+
+    TimelineTree(flecs::world* w, size_t keyframe_every = 60, bool compress = true)
+        : active_node(nullptr), world(w),
+          keyframe_interval_(keyframe_every), enable_compression_(compress)
+    {
+        internal_filter.init(world);
+        // Create root history + node
+        auto root_hist = std::make_unique<StateHistory>(w, keyframe_every, compress);
+        auto root_node = std::make_unique<TimelineNode>();
+        root_node->history = root_hist.get();
+        root_node->branch_frame = 0;
+        root_node->parent = nullptr;
+
+        active_node = root_node.get();
+
+        histories_.push_back(std::move(root_hist));
+        nodes_.push_back(std::move(root_node));
+    }
+
+    ~TimelineTree() {
+        // Delete observers before histories are freed, so world cleanup
+        // doesn't fire callbacks into dangling tree pointer
+        for (ecs_entity_t obs : observer_entities_) {
+            ecs_delete(world->c_ptr(), obs);
         }
-        else
-        {
-            // Start from the snapshot of the parent at branchframe
-            node->parent->history->roll_to(node->branch_frame);
-            if (target_frame > 0)
-            {
-                node->history->entity_id_remap = node->parent->history->entity_id_remap;
-                // Non root nodes are offset by 1 such that the 0th index is the
-                // first delta from their source made into a full keyframe
-                node->history->roll_to(target_frame-1);
-            }
+        observer_entities_.clear();
+    }
+
+    // Register a component type on tree + root history, store for branch propagation
+    template <typename T>
+    void register_component() {
+        // Register on root history
+        root()->history->register_component<T>();
+
+        // Store registration data for branch propagation
+        flecs::entity_t id = world->component<T>().id();
+        size_t size = sizeof(T);
+        registry.register_component(id, size);
+
+        if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), id) == tracked_component_ids.end()) {
+            tracked_component_ids.push_back(id);
+            tracked_component_sizes.push_back(size);
         }
     }
+
+    // Set up a single set of observers on the world. Callbacks route to active_node.
+    void setup_observers() {
+        StateHistory* root_hist = root()->history;
+
+        for (ecs_entity_t comp_id : tracked_component_ids) {
+            // OnAdd observer
+            ecs_observer_desc_t add_desc = {};
+            add_desc.query.terms[0].id = comp_id;
+            add_desc.events[0] = EcsOnAdd;
+            add_desc.callback = [](ecs_iter_t *it) {
+                TimelineTree* tree = static_cast<TimelineTree*>(it->ctx);
+                ecs_entity_t comp_id = ecs_field_id(it, 0);
+                for (int i = 0; i < it->count; i++) {
+                    tree->active_node->history->record_event(it->entities[i], comp_id, ComponentOp::Add);
+                }
+            };
+            add_desc.ctx = this;
+            observer_entities_.push_back(ecs_observer_init(world->c_ptr(), &add_desc));
+
+            // OnRemove observer
+            ecs_observer_desc_t remove_desc = {};
+            remove_desc.query.terms[0].id = comp_id;
+            remove_desc.events[0] = EcsOnRemove;
+            remove_desc.callback = [](ecs_iter_t *it) {
+                TimelineTree* tree = static_cast<TimelineTree*>(it->ctx);
+                ecs_entity_t comp_id = ecs_field_id(it, 0);
+                for (int i = 0; i < it->count; i++) {
+                    tree->active_node->history->record_event(it->entities[i], comp_id, ComponentOp::Remove);
+                }
+            };
+            remove_desc.ctx = this;
+            observer_entities_.push_back(ecs_observer_init(world->c_ptr(), &remove_desc));
+
+            // OnSet observer
+            ecs_observer_desc_t set_desc = {};
+            set_desc.query.terms[0].id = comp_id;
+            set_desc.events[0] = EcsOnSet;
+            set_desc.callback = [](ecs_iter_t *it) {
+                TimelineTree* tree = static_cast<TimelineTree*>(it->ctx);
+                ecs_entity_t comp_id = ecs_field_id(it, 0);
+                for (int i = 0; i < it->count; i++) {
+                    tree->active_node->history->record_event(it->entities[i], comp_id, ComponentOp::Set);
+                }
+            };
+            set_desc.ctx = this;
+            observer_entities_.push_back(ecs_observer_init(world->c_ptr(), &set_desc));
+        }
+
+        // Wildcard tag add
+        observer_entities_.push_back(world->observer()
+            .with(flecs::Wildcard)
+            .event(flecs::OnAdd)
+            .each([this](flecs::iter& it, size_t index) {
+                auto e = it.entity(index);
+                auto id = it.id(0);
+                if (ECS_IS_PAIR(id)) return;
+                auto component_id = id;
+                if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), component_id) != tracked_component_ids.end()) return;
+                if (internal_filter.is_internal_component(component_id)) return;
+                active_node->history->record_event(e.id(), component_id, ComponentOp::Add);
+            }).id());
+
+        // Wildcard tag remove
+        observer_entities_.push_back(world->observer()
+            .with(flecs::Wildcard)
+            .event(flecs::OnRemove)
+            .each([this](flecs::iter& it, size_t index) {
+                auto e = it.entity(index);
+                auto id = it.id(0);
+                if (ECS_IS_PAIR(id)) return;
+                auto component_id = id;
+                if (std::find(tracked_component_ids.begin(), tracked_component_ids.end(), component_id) != tracked_component_ids.end()) return;
+                if (internal_filter.is_internal_component(component_id)) return;
+                active_node->history->record_event(e.id(), component_id, ComponentOp::Remove);
+            }).id());
+
+        // Wildcard relationship add
+        observer_entities_.push_back(world->observer()
+            .with(flecs::Wildcard, flecs::Wildcard)
+            .event(flecs::OnAdd)
+            .each([this](flecs::iter& it, size_t index) {
+                auto e = it.entity(index);
+                auto pair = it.pair(0);
+                auto rel = pair.first();
+                auto tgt = pair.second();
+                active_node->history->record_relationship(e.id(), rel, tgt, ComponentOp::Add);
+            }).id());
+
+        // Wildcard relationship remove
+        observer_entities_.push_back(world->observer()
+            .with(flecs::Wildcard, flecs::Wildcard)
+            .event(flecs::OnRemove)
+            .each([this](flecs::iter& it, size_t index) {
+                auto e = it.entity(index);
+                auto pair = it.pair(0);
+                auto rel = pair.first();
+                auto tgt = pair.second();
+                active_node->history->record_relationship(e.id(), rel, tgt, ComponentOp::Remove);
+            }).id());
+    }
+
+    // Create a branch from source node at the given frame. Returns the new node.
+    TimelineNode* branch(TimelineNode* source, uint32_t frame) {
+        auto branch_hist = std::make_unique<StateHistory>(world, keyframe_interval_, enable_compression_);
+
+        // Copy component registration data
+        branch_hist->tracked_component_ids = tracked_component_ids;
+        branch_hist->tracked_component_sizes = tracked_component_sizes;
+        branch_hist->registry = registry;
+
+        auto branch_node = std::make_unique<TimelineNode>();
+        branch_node->history = branch_hist.get();
+        branch_node->branch_frame = frame;
+        branch_node->parent = source;
+
+        source->children.push_back(branch_node.get());
+
+        TimelineNode* result = branch_node.get();
+        histories_.push_back(std::move(branch_hist));
+        nodes_.push_back(std::move(branch_node));
+        return result;
+    }
+
+    // Roll the world to a specific node+frame, managing observer routing
+    void roll_to(TimelineNode* node, size_t target_frame) {
+        if (node->parent == nullptr) {
+            // Root node: just set active and roll
+            active_node = node;
+            node->history->roll_to(target_frame);
+        } else {
+            // Branch node:
+            // 1. Set active to parent before parent rollback
+            active_node = node->parent;
+            // Parent's recording_enabled=false gates all recording during its rollback
+            node->parent->history->roll_to(node->branch_frame);
+
+            // 2. Sync entity state from parent to branch
+            node->history->entity_id_remap = node->parent->history->entity_id_remap;
+            node->history->tracked_entities = node->parent->history->tracked_entities;
+            node->history->entity_names = node->parent->history->entity_names;
+
+            // 3. Switch active to branch
+            active_node = node;
+
+            // 4. Clear stale events (parent rollback may have triggered observers)
+            node->history->frame_events.clear();
+            node->history->entity_events.clear();
+            node->history->relationship_events.clear();
+
+            if (target_frame > 0) {
+                // Branch frames are offset by 1: index 0 is first delta from branch point
+                node->history->roll_to(target_frame - 1);
+            }
+
+            // 5. Rebuild prev_frame_state from current world state
+            node->history->rebuild_prev_frame_state();
+        }
+    }
+
+    // Delegate: track an entity on the active history
+    void track_entity(flecs::entity e) {
+        active_node->history->track_entity(e);
+    }
+
+    // Delegate: untrack an entity on the active history
+    void untrack_entity(flecs::entity e) {
+        active_node->history->untrack_entity(e);
+    }
+
+    // Delegate: capture state on the active history
+    void capture_state() {
+        active_node->history->capture_state();
+    }
+
+    // Accessors
+    TimelineNode* root() const { return nodes_[0].get(); }
+    StateHistory* active_history() const { return active_node->history; }
 };
