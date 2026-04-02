@@ -242,6 +242,96 @@ int main() {
     }
     std::cout << "  rollback_to(10) correct after scan\n\n";
 
+    // Phase 5: Verify relation_change_index contains correct frames
+    std::cout << "Phase 5: Verify relation_change_index correctness...\n";
+    {
+        auto likes_id = ecs.component<Likes>().id();
+        const auto& change_frames = history.get_relation_change_frames(likes_id);
+
+        // Likes relationships change at iteration indices: 3, 7, 12, 15, 20, 25
+        std::vector<size_t> expected = {3, 7, 12, 15, 20, 25};
+        assert_true(change_frames.size() == expected.size(),
+            "relation_change_index should have 6 entries for Likes");
+
+        for (size_t i = 0; i < expected.size(); i++) {
+            assert_true(change_frames[i] == expected[i],
+                "relation_change_index frame mismatch");
+        }
+
+        // Verify binary search accessor
+        assert_true(history.has_relation_change_at_frame(likes_id, 3),
+            "has_relation_change_at_frame should return true for frame 3");
+        assert_true(history.has_relation_change_at_frame(likes_id, 7),
+            "has_relation_change_at_frame should return true for frame 7");
+        assert_true(!history.has_relation_change_at_frame(likes_id, 0),
+            "has_relation_change_at_frame should return false for frame 0");
+        assert_true(!history.has_relation_change_at_frame(likes_id, 5),
+            "has_relation_change_at_frame should return false for frame 5");
+
+        // Verify empty result for unknown relation
+        const auto& empty_frames = history.get_relation_change_frames(999999);
+        assert_true(empty_frames.empty(),
+            "get_relation_change_frames should return empty for unknown relation");
+
+        std::cout << "  relation_change_index has correct " << change_frames.size() << " entries\n\n";
+    }
+
+    // Phase 6: Verify prefiltered scan produces identical intervals as full scan
+    std::cout << "Phase 6: Verify prefiltered scan equivalence...\n";
+    {
+        auto likes_id = ecs.component<Likes>().id();
+        const auto& change_frames = history.get_relation_change_frames(likes_id);
+
+        // Full scan: evaluate Likes query at every frame
+        history.rollback_to(0);
+        auto q = ecs.query_builder<>()
+            .with(likes_id, flecs::Wildcard)
+            .build();
+
+        std::vector<bool> full_results;
+        for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
+            if (frame > 0) history.step_forward();
+            bool has_match = false;
+            q.each([&](flecs::entity e) { has_match = true; });
+            full_results.push_back(has_match);
+        }
+
+        // Prefiltered scan: only evaluate at frame 0 and change frames
+        history.rollback_to(0);
+        auto change_it = std::lower_bound(change_frames.begin(), change_frames.end(), (size_t)0);
+
+        std::vector<bool> filtered_results;
+        bool carry_forward = false;
+        for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
+            if (frame > 0) history.step_forward();
+
+            bool should_evaluate = (frame == 0);
+            if (!should_evaluate && change_it != change_frames.end() && *change_it == (size_t)frame) {
+                should_evaluate = true;
+                ++change_it;
+            }
+
+            if (should_evaluate) {
+                carry_forward = false;
+                q.each([&](flecs::entity e) { carry_forward = true; });
+            }
+            filtered_results.push_back(carry_forward);
+        }
+
+        // Compare results
+        int filter_mismatches = 0;
+        for (int frame = 0; frame < TOTAL_FRAMES; frame++) {
+            if (full_results[frame] != filtered_results[frame]) {
+                std::cerr << "  Frame " << frame << ": full=" << full_results[frame]
+                          << " filtered=" << filtered_results[frame] << "\n";
+                filter_mismatches++;
+            }
+        }
+        assert_true(filter_mismatches == 0,
+            "Prefiltered scan should produce identical results to full scan");
+        std::cout << "  Prefiltered scan matches full scan across all " << TOTAL_FRAMES << " frames\n\n";
+    }
+
     std::cout << "=== All Tests Passed! ===\n\n";
     std::cout << "step_forward Features Verified:\n";
     std::cout << "  - Produces identical world state as roll_forward for all frames\n";
@@ -250,6 +340,8 @@ int main() {
     std::cout << "  - Handles relationship add/remove across frames\n";
     std::cout << "  - Repeatable across multiple sequential scans\n";
     std::cout << "  - Normal rollback_to works correctly after scan\n";
+    std::cout << "  - relation_change_index correctly tracks relationship change frames\n";
+    std::cout << "  - Prefiltered scan produces identical intervals as full scan\n";
 
     return 0;
 }

@@ -760,6 +760,7 @@ int main(int, char *[]) {
     };
 
     // Step through resimulation - returns true when complete
+    // Uses relation_change_index to skip frames where NearBy relationships don't change
     auto step_resimulation = [&]() -> bool {
         if (!resim_state.is_running) return true;
 
@@ -773,18 +774,39 @@ int main(int, char *[]) {
             .with((FoodType)resim_state.food_type_b).src("$X")
             .build();
 
+        // Get the sorted list of frames where NearBy relationships change
+        const auto& change_frames = history.get_relation_change_frames(NearBy.id());
+        // Find first change frame >= current batch start
+        auto change_it = std::lower_bound(change_frames.begin(), change_frames.end(),
+                                           (size_t)resim_state.current_frame);
+
         for (int frame = resim_state.current_frame; frame < end_frame; frame++) {
             // Apply this frame's state
             if (frame > 0) {
                 history.step_forward();
             }
 
-            // Check query: any entity with food_type_a NearBy any entity with food_type_b
-            domain.mark_frame = false;
+            // Only evaluate query at frame 0 or frames with NearBy changes
+            bool should_evaluate = (frame == 0);
+            if (!should_evaluate && change_it != change_frames.end() && *change_it == (size_t)frame) {
+                should_evaluate = true;
+                ++change_it;
+            } else if (change_it != change_frames.end() && *change_it < (size_t)frame) {
+                // Advance iterator past current frame (shouldn't normally happen)
+                change_it = std::lower_bound(change_it, change_frames.end(), (size_t)frame);
+                if (change_it != change_frames.end() && *change_it == (size_t)frame) {
+                    should_evaluate = true;
+                    ++change_it;
+                }
+            }
 
-            q.each([&](flecs::entity e) {
-                domain.mark_frame = true;
-            });
+            if (should_evaluate) {
+                domain.mark_frame = false;
+                q.each([&](flecs::entity e) {
+                    domain.mark_frame = true;
+                });
+            }
+            // else: domain.mark_frame carries forward from the previous frame
 
             // Update interval tracking
             domain.frames_since_start++;

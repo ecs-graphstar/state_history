@@ -443,6 +443,9 @@ public:
     // Previous frame cache: entity+component -> data
     std::unordered_map<uint64_t, std::vector<uint8_t>> prev_frame_state;
 
+    // Per-relation-type index: relation entity ID → sorted frame indices with events
+    std::unordered_map<flecs::entity_t, std::vector<size_t>> relation_change_index;
+
     // Component registry for sizes
     ComponentRegistry registry;
 
@@ -936,10 +939,26 @@ public:
         // If we're capturing in the middle of the timeline, erase future frames (branch behavior)
         if (current_frame < snapshots.size()) {
             snapshots.erase(snapshots.begin() + current_frame, snapshots.end());
+            // Truncate index entries for erased future frames
+            for (auto& [rel_id, frames] : relation_change_index) {
+                auto it = std::lower_bound(frames.begin(), frames.end(), current_frame);
+                frames.erase(it, frames.end());
+            }
         }
 
         snapshots.push_back(std::move(snapshot));
         current_frame++;
+
+        // Record relation change frames before clearing events
+        if (!relationship_events.empty()) {
+            size_t frame_idx = snapshots.size() - 1;
+            std::unordered_set<flecs::entity_t> seen;
+            for (const auto& event : relationship_events) {
+                if (seen.insert(event.relation).second) {
+                    relation_change_index[event.relation].push_back(frame_idx);
+                }
+            }
+        }
 
         // Clear events for next frame
         frame_events.clear();
@@ -1920,6 +1939,18 @@ public:
 
     uint64_t make_key(flecs::entity_t entity, flecs::entity_t component) const {
         return (static_cast<uint64_t>(entity) << 32) | component;
+    }
+
+    const std::vector<size_t>& get_relation_change_frames(flecs::entity_t relation_id) const {
+        static const std::vector<size_t> empty;
+        auto it = relation_change_index.find(relation_id);
+        return it != relation_change_index.end() ? it->second : empty;
+    }
+
+    bool has_relation_change_at_frame(flecs::entity_t relation_id, size_t frame) const {
+        auto it = relation_change_index.find(relation_id);
+        if (it == relation_change_index.end()) return false;
+        return std::binary_search(it->second.begin(), it->second.end(), frame);
     }
 
     void print_stats() {
