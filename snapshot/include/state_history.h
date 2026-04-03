@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <source_location>
 
 #include <flecs.h>
 
@@ -244,6 +245,10 @@ public:
   std::unordered_set<flecs::entity_t> tracked_entities;
   std::unordered_map<flecs::entity_t, std::string> entity_names;
 
+  // Spawn ID mapping
+  std::unordered_map<flecs::entity_t, uint64_t> entity_to_spawn_id;
+  std::unordered_map<uint64_t, flecs::entity_t> spawn_id_to_entity;
+
   // TODO: What happens if there are multiple recreated entities that reuse an
   // id in a StateHistory? Map old entity IDs to new IDs during rollback (when
   // entities are recreated)
@@ -317,6 +322,22 @@ public:
   void track_entity(flecs::entity e);
 
   void untrack_entity(flecs::entity e);
+
+  uint64_t get_stable_id(flecs::entity_t id) const {
+    auto it = entity_to_spawn_id.find(id);
+    if (it != entity_to_spawn_id.end()) {
+      return it->second;
+    }
+    return static_cast<uint64_t>(id);
+  }
+
+  flecs::entity_t get_runtime_id(uint64_t stable_id) const {
+    auto it = spawn_id_to_entity.find(stable_id);
+    if (it != spawn_id_to_entity.end()) {
+      return it->second;
+    }
+    return static_cast<flecs::entity_t>(stable_id);
+  }
 
   std::vector<uint8_t> compress_buffer(const std::vector<uint8_t> &input);
 
@@ -401,14 +422,24 @@ struct TimelineNode {
                          // diverges...
   TimelineNode *parent;
   std::vector<TimelineNode *> children;
+  uint32_t branch_id;
 };
 
 class TimelineTree {
 public:
   TimelineNode *root_timeline;
-  // Do we need to store an active timeline?
-  // TimelineNode* active_timeline;
+  TimelineNode *active_timeline;
   size_t active_frame;
+  uint32_t next_branch_id;
+
+  TimelineTree(TimelineNode* root) : root_timeline(root), active_timeline(root), active_frame(0), next_branch_id(1) {
+    if (root) {
+      root->branch_id = 0;
+    }
+  }
 
   void roll_to(TimelineNode *node, size_t target_frame);
+  TimelineNode* create_branch(TimelineNode* parent, size_t frame);
+  void checkout(TimelineNode* branch, size_t target_frame);
+  flecs::entity spawn_entity(std::source_location loc = std::source_location::current(), const std::string& extra_data = "");
 };

@@ -6,7 +6,7 @@ add_subdirectory("../project_template_ui/deps/flecs" "deps/flecs")
 find_package(ZLIB REQUIRED)
 
 add_library(project_settings INTERFACE)
-target_compile_features(project_settings INTERFACE cxx_std_17)
+target_compile_features(project_settings INTERFACE cxx_std_20)
 target_link_libraries(project_settings INTERFACE flecs ZLIB::ZLIB)
 target_include_directories(project_settings INTERFACE
     "src"

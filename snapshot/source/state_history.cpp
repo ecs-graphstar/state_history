@@ -536,8 +536,9 @@ StateHistory::SectionData StateHistory::encode_and_compress_entities(
                       reinterpret_cast<uint8_t*>(&created_count) + sizeof(uint32_t));
 
   for (const auto& [id, name] : entities_created) {
-    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&id),
-                        reinterpret_cast<const uint8_t*>(&id) + sizeof(flecs::entity_t));
+    uint64_t stable_id = get_stable_id(id);
+    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&stable_id),
+                        reinterpret_cast<const uint8_t*>(&stable_id) + sizeof(flecs::entity_t));
 
     uint16_t name_len = static_cast<uint16_t>(name.size());
     uncompressed.insert(uncompressed.end(), reinterpret_cast<uint8_t*>(&name_len),
@@ -554,8 +555,9 @@ StateHistory::SectionData StateHistory::encode_and_compress_entities(
                       reinterpret_cast<uint8_t*>(&destroyed_count) + sizeof(uint32_t));
 
   for (flecs::entity_t id : entities_destroyed) {
-    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&id),
-                        reinterpret_cast<const uint8_t*>(&id) + sizeof(flecs::entity_t));
+    uint64_t stable_id = get_stable_id(id);
+    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&stable_id),
+                        reinterpret_cast<const uint8_t*>(&stable_id) + sizeof(flecs::entity_t));
   }
 
   // Encode existing_entities
@@ -564,8 +566,9 @@ StateHistory::SectionData StateHistory::encode_and_compress_entities(
                       reinterpret_cast<uint8_t*>(&existing_count) + sizeof(uint32_t));
 
   for (flecs::entity_t id : existing_entities) {
-    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&id),
-                        reinterpret_cast<const uint8_t*>(&id) + sizeof(flecs::entity_t));
+    uint64_t stable_id = get_stable_id(id);
+    uncompressed.insert(uncompressed.end(), reinterpret_cast<const uint8_t*>(&stable_id),
+                        reinterpret_cast<const uint8_t*>(&stable_id) + sizeof(flecs::entity_t));
   }
 
   SectionData section;
@@ -832,9 +835,9 @@ StateHistory::SectionData StateHistory::capture_all_relationships() {
 
       // Add relationship to snapshot
       RelationshipHeader header = {};
-      header.entity = entity_id;
-      header.relation = rel.id();
-      header.target = tgt.id();
+      header.entity = get_stable_id(entity_id);
+      header.relation = get_stable_id(rel.id());
+      header.target = get_stable_id(tgt.id());
       header.op = ComponentOp::Add;  // Keyframes store all as Add
       relationships.push_back(header);
     });
@@ -850,9 +853,9 @@ StateHistory::SectionData StateHistory::capture_changed_relationships() {
 
   for (const auto& event : relationship_events) {
     RelationshipHeader header = {};
-    header.entity = event.entity;
-    header.relation = event.relation;
-    header.target = event.target;
+    header.entity = get_stable_id(event.entity);
+    header.relation = get_stable_id(event.relation);
+    header.target = get_stable_id(event.target);
     header.op = event.op;
     relationships.push_back(header);
 
@@ -967,8 +970,8 @@ void StateHistory::capture_component_op(std::vector<ComponentHeader>& headers,
   }
 
   ComponentHeader header = {};
-  header.entity = entity;
-  header.component = component;
+  header.entity = get_stable_id(entity);
+  header.component = get_stable_id(component);
   header.size = static_cast<uint16_t>(serialized_data.size());
   header.offset = static_cast<uint16_t>(data_section.size());
   header.op = op;
@@ -1003,8 +1006,8 @@ void StateHistory::capture_component_diff(std::vector<ComponentHeader>& headers,
     // or if the component size dynamically changed (though standard components don't).
     // Store as full data with Set operation
     ComponentHeader header = {};
-    header.entity = entity_id;
-    header.component = component_id;
+    header.entity = get_stable_id(entity_id);
+    header.component = get_stable_id(component_id);
     header.size = static_cast<uint16_t>(serialized_data.size());
     header.offset = static_cast<uint16_t>(data_section.size());
     header.op = ComponentOp::Set;
@@ -1030,8 +1033,8 @@ void StateHistory::capture_component_diff(std::vector<ComponentHeader>& headers,
 
   if (has_changes) {
     ComponentHeader header = {};
-    header.entity = entity_id;
-    header.component = component_id;
+    header.entity = get_stable_id(entity_id);
+    header.component = get_stable_id(component_id);
     header.size = static_cast<uint16_t>(serialized_data.size());
     header.offset = static_cast<uint16_t>(data_section.size());
     header.op = ComponentOp::Set;
@@ -1194,6 +1197,8 @@ void StateHistory::restore_entities_from_keyframe(size_t frame_idx) {
       // Get or create entity by name
       flecs::entity e = world->entity(name.c_str());
       entity_id_remap[old_id] = e.id();
+    entity_to_spawn_id[e.id()] = old_id;
+    spawn_id_to_entity[old_id] = e.id();
       tracked_entities.insert(e.id());
       entity_names[e.id()] = name;
       std::cout << "  Recreated entity " << name << ": old ID " << old_id << " -> new ID " << e.id() << "\n";
@@ -1379,28 +1384,29 @@ void StateHistory::restore_keyframe(size_t frame_idx) {
       continue;
 
     // Remap entity ID if needed
-    flecs::entity_t entity_id = header->entity;
+    flecs::entity_t entity_id = get_runtime_id(header->entity);
     if (entity_id_remap.count(entity_id)) {
       entity_id = entity_id_remap[entity_id];
     }
+    flecs::entity_t comp_id = get_runtime_id(header->component);
 
     flecs::entity e(world->get_world(), entity_id);
 
     // Check if this is a tag (size 0)
     if (header->size == 0) {
       // This is a tag - just add it using C API
-      ecs_add_id(world->c_ptr(), entity_id, header->component);
+      ecs_add_id(world->c_ptr(), entity_id, comp_id);
       continue;
     }
 
     // Restore component using C API
-    size_t comp_size = registry.get_size(header->component);
-    void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
+    size_t comp_size = registry.get_size(comp_id);
+    void* comp = ecs_ensure_id(world->c_ptr(), entity_id, comp_id, comp_size);
     if (comp) {
       std::vector<uint8_t> buffer(data, data + header->size);
-      registry.deserialize(header->component, comp, buffer);
-      ecs_modified_id(world->c_ptr(), entity_id, header->component);
-      auto comp_key = make_key(entity_id, header->component);
+      registry.deserialize(comp_id, comp, buffer);
+      ecs_modified_id(world->c_ptr(), entity_id, comp_id);
+      auto comp_key = make_key(entity_id, comp_id);
       prev_frame_state[comp_key] = buffer;
     }
   }
@@ -1410,13 +1416,15 @@ void StateHistory::restore_keyframe(size_t frame_idx) {
   world->defer_begin();
   for (const auto& rel_header : relationships) {
     // Remap entity ID if needed
-    flecs::entity_t entity_id = rel_header.entity;
+    flecs::entity_t entity_id = get_runtime_id(rel_header.entity);
     if (entity_id_remap.count(entity_id)) {
       entity_id = entity_id_remap[entity_id];
     }
 
+    flecs::entity_t rel_id = get_runtime_id(rel_header.relation);
+
     // Remap target ID if needed
-    flecs::entity_t target_id = rel_header.target;
+    flecs::entity_t target_id = get_runtime_id(rel_header.target);
     if (entity_id_remap.count(target_id)) {
       target_id = entity_id_remap[target_id];
     }
@@ -1425,7 +1433,7 @@ void StateHistory::restore_keyframe(size_t frame_idx) {
     flecs::entity target(world->get_world(), target_id);
 
     // Add the relationship
-    e.add(rel_header.relation, target_id);
+    e.add(rel_id, target_id);
   }
   world->defer_end();
 }
@@ -1485,6 +1493,8 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
         flecs::entity e = world->entity(name.c_str());
         // Add to remap
         entity_id_remap[old_id] = e.id();
+        entity_to_spawn_id[e.id()] = old_id;
+        spawn_id_to_entity[old_id] = e.id();
         tracked_entities.insert(e.id());
         entity_names[e.id()] = name;
         std::cout << "    Created entity " << name << ": old ID " << old_id << " -> new ID " << e.id() << "\n";
@@ -1525,10 +1535,12 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
           continue;
 
         // Remap entity ID if needed
-        flecs::entity_t entity_id = header->entity;
+        flecs::entity_t entity_id = get_runtime_id(header->entity);
         if (entity_id_remap.count(entity_id)) {
           entity_id = entity_id_remap[entity_id];
         }
+
+        flecs::entity_t comp_id = get_runtime_id(header->component);
 
         // Skip component operations for entities destroyed in this frame
         if (destroyed_this_frame.count(entity_id)) {
@@ -1540,40 +1552,40 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
         // Check if this is a tag (size 0)
         if (header->size == 0) {
           if (header->op == ComponentOp::Add) {
-            ecs_add_id(world->c_ptr(), entity_id, header->component);
+            ecs_add_id(world->c_ptr(), entity_id, comp_id);
           } else if (header->op == ComponentOp::Remove) {
-            ecs_remove_id(world->c_ptr(), entity_id, header->component);
+            ecs_remove_id(world->c_ptr(), entity_id, comp_id);
           }
           continue;
         }
 
         // Handle operation based on type using C API
-        size_t comp_size = registry.get_size(header->component);
+        size_t comp_size = registry.get_size(comp_id);
         if (header->op == ComponentOp::Add) {
           // Add component with data
           const uint8_t* data = snapshot.get_data(header, decompressed);
           if (data) {
-            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
+            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, comp_id, comp_size);
             if (comp) {
               std::vector<uint8_t> buffer(data, data + header->size);
-              registry.deserialize(header->component, comp, buffer);
-              ecs_modified_id(world->c_ptr(), entity_id, header->component);
-              auto comp_key = make_key(entity_id, header->component);
+              registry.deserialize(comp_id, comp, buffer);
+              ecs_modified_id(world->c_ptr(), entity_id, comp_id);
+              auto comp_key = make_key(entity_id, comp_id);
               prev_frame_state[comp_key] = buffer;
             }
           }
         } else if (header->op == ComponentOp::Remove) {
           // Remove component
-          ecs_remove_id(world->c_ptr(), entity_id, header->component);
-          auto comp_key = make_key(entity_id, header->component);
+          ecs_remove_id(world->c_ptr(), entity_id, comp_id);
+          auto comp_key = make_key(entity_id, comp_id);
           prev_frame_state.erase(comp_key);
         } else if (header->op == ComponentOp::Set) {
           // Apply XOR diff
           const uint8_t* diff_data = snapshot.get_data(header, decompressed);
           if (diff_data) {
-            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, header->component, comp_size);
+            void* comp = ecs_ensure_id(world->c_ptr(), entity_id, comp_id, comp_size);
             if (comp) {
-              auto comp_key = make_key(entity_id, header->component);
+              auto comp_key = make_key(entity_id, comp_id);
               auto& prev = prev_frame_state[comp_key];
 
               if (prev.size() != header->size) {
@@ -1584,8 +1596,8 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
                 prev[j] ^= diff_data[j];
               }
 
-              registry.deserialize(header->component, comp, prev);
-              ecs_modified_id(world->c_ptr(), entity_id, header->component);
+              registry.deserialize(comp_id, comp, prev);
+              ecs_modified_id(world->c_ptr(), entity_id, comp_id);
             }
           }
         }
@@ -1605,13 +1617,15 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
   world->defer_begin();
   for (const auto& rel_header : relationships) {
     // Remap entity ID if needed
-    flecs::entity_t entity_id = rel_header.entity;
+    flecs::entity_t entity_id = get_runtime_id(rel_header.entity);
     if (entity_id_remap.count(entity_id)) {
       entity_id = entity_id_remap[entity_id];
     }
 
+    flecs::entity_t rel_id = get_runtime_id(rel_header.relation);
+
     // Remap target ID if needed
-    flecs::entity_t target_id = rel_header.target;
+    flecs::entity_t target_id = get_runtime_id(rel_header.target);
     if (entity_id_remap.count(target_id)) {
       target_id = entity_id_remap[target_id];
     }
@@ -1622,7 +1636,7 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
     }
 
     flecs::entity e(world->get_world(), entity_id);
-    flecs::entity rel(world->get_world(), rel_header.relation);
+    flecs::entity rel(world->get_world(), rel_id);
     flecs::entity tgt(world->get_world(), target_id);
 
     if (rel_header.op == ComponentOp::Add) {
@@ -1634,7 +1648,7 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
         std::cout << "      Adding relationship: " << (e_name ? e_name : "unnamed") << " -["
                   << (rel_name ? rel_name : "unnamed") << "]-> " << (tgt_name ? tgt_name : "unnamed") << "\n";
       }
-      e.add(rel_header.relation, target_id);
+      e.add(rel_id, target_id);
     } else if (rel_header.op == ComponentOp::Remove) {
       // Remove the relationship
       if (e.is_alive() && rel.is_alive() && tgt.is_alive()) {
@@ -1644,7 +1658,7 @@ void StateHistory::apply_snapshot_forward(Snapshot& snapshot) {
         std::cout << "      Removing relationship: " << (e_name ? e_name : "unnamed") << " -["
                   << (rel_name ? rel_name : "unnamed") << "]-> " << (tgt_name ? tgt_name : "unnamed") << "\n";
       }
-      e.remove(rel_header.relation, target_id);
+      e.remove(rel_id, target_id);
     }
   }
   world->defer_end();
@@ -1782,4 +1796,65 @@ void TimelineTree::roll_to(TimelineNode* node, size_t target_frame) {
       node->history->roll_to(target_frame - 1);
     }
   }
+  active_timeline = node;
+  active_frame = target_frame;
+}
+
+TimelineNode* TimelineTree::create_branch(TimelineNode* parent, size_t frame) {
+  StateHistory* branch_history = new StateHistory(parent->history->world, parent->history->keyframe_interval, parent->history->enable_compression);
+  branch_history->tracked_entities = parent->history->tracked_entities;
+  branch_history->entity_names = parent->history->entity_names;
+  branch_history->tracked_component_ids = parent->history->tracked_component_ids;
+  branch_history->tracked_component_sizes = parent->history->tracked_component_sizes;
+  branch_history->registry = parent->history->registry;
+  branch_history->setup_observers();
+
+  TimelineNode* new_branch = new TimelineNode{branch_history, static_cast<uint32_t>(frame), parent, {}, next_branch_id++};
+  parent->children.push_back(new_branch);
+  return new_branch;
+}
+
+void TimelineTree::checkout(TimelineNode* branch, size_t target_frame) {
+  roll_to(branch, target_frame);
+}
+
+flecs::entity TimelineTree::spawn_entity(std::source_location loc, const std::string& extra_data) {
+  // Simple FNV-1a hash
+  uint64_t hash = 0xcbf29ce484222325ULL;
+  auto hash_string = [&hash](const char* str) {
+    while (*str) {
+      hash ^= static_cast<uint64_t>(*str++);
+      hash *= 0x100000001b3ULL;
+    }
+  };
+
+  hash_string(loc.file_name());
+
+  uint32_t line = loc.line();
+  for (size_t i = 0; i < sizeof(line); ++i) {
+    hash ^= static_cast<uint64_t>((line >> (i * 8)) & 0xFF);
+    hash *= 0x100000001b3ULL;
+  }
+
+  uint32_t column = loc.column();
+  for (size_t i = 0; i < sizeof(column); ++i) {
+    hash ^= static_cast<uint64_t>((column >> (i * 8)) & 0xFF);
+    hash *= 0x100000001b3ULL;
+  }
+
+  uint32_t branch_id = active_timeline ? active_timeline->branch_id : 0;
+  for (size_t i = 0; i < sizeof(branch_id); ++i) {
+    hash ^= static_cast<uint64_t>((branch_id >> (i * 8)) & 0xFF);
+    hash *= 0x100000001b3ULL;
+  }
+
+  hash_string(extra_data.c_str());
+
+  flecs::entity e = active_timeline->history->world->entity();
+
+  active_timeline->history->entity_to_spawn_id[e.id()] = hash;
+  active_timeline->history->spawn_id_to_entity[hash] = e.id();
+  active_timeline->history->track_entity(e);
+
+  return e;
 }

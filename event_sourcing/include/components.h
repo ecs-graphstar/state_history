@@ -15,6 +15,10 @@ struct Position {
     }
 };
 
+struct SpawnID {
+    uint64_t id;
+};
+
 struct Velocity {
     double x, y;
 

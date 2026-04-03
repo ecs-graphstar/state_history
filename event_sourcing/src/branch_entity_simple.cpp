@@ -11,9 +11,9 @@ int main() {
     StateHistory* root_history = new StateHistory(ecs, 5, false);
     register_all_components(*root_history);
     root_history->setup_observers();
-    TimelineNode root_timeline = {root_history, 0, nullptr, {}};
+    TimelineNode root_timeline = {root_history, 0, nullptr, {}, 0};
     
-    TimelineTree tree = {&root_timeline, 0};
+    TimelineTree tree(&root_timeline);
 
     std::cout << "Capturing frame 0 (no entities)...\n";
     root_timeline.history->capture_state();
@@ -41,8 +41,7 @@ int main() {
     branch_history->tracked_component_sizes = root_history->tracked_component_sizes;
     register_all_components(*branch_history);
     branch_history->setup_observers();
-    TimelineNode* divergent_timeline = new TimelineNode{branch_history, 1, &root_timeline, {}};
-    root_timeline.children.push_back(divergent_timeline);
+    TimelineNode* divergent_timeline = tree.create_branch(&root_timeline, 1);
 
     // root_timeline.history->rollback_to(1);
     tree.roll_to(divergent_timeline, 0);
