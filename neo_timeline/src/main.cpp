@@ -12,6 +12,11 @@
 #include <nanovg_gl.h>
 #include "../include/components.h"
 #include "../include/state_history.h"
+#include <stack>
+#include <tracy/Tracy.hpp>
+#include <tracy/TracyC.h>
+
+static thread_local std::stack<TracyCZoneCtx> zone_stack;
 
 // Timeline UI state
 struct TimelineState {
@@ -581,7 +586,34 @@ int get_frame_from_mouse(float mouse_x, int width, TimelineState& tl_state) {
     return std::max(1, std::min(frame, total_frames));
 }
 
+void trace_push(const char *file, size_t line, const char *name) {
+    uint64_t srcloc = ___tracy_alloc_srcloc_name(
+        (uint32_t)line,
+        file, strlen(file),       // Source file
+        name, strlen(name),       // Function name
+        name, strlen(name),       // Zone name
+        0                         // Color
+    );
+
+    TracyCZoneCtx ctx = ___tracy_emit_zone_begin_alloc(srcloc, 1);
+    zone_stack.push(ctx);
+}
+
+void trace_pop(const char *file, size_t line, const char *name) {
+    if (!zone_stack.empty()) {
+        TracyCZoneEnd(zone_stack.top());
+        zone_stack.pop();
+    }
+}
+
 int main(int, char *[]) {
+
+    ecs_os_set_api_defaults();
+    ecs_os_api_t os_api = ecs_os_get_api();
+    os_api.perf_trace_push_ = trace_push;
+    os_api.perf_trace_pop_ = trace_pop;
+    ecs_os_set_api(&os_api);
+
     glfwSetErrorCallback(error_callback);
 
     if (!glfwInit()) {
@@ -659,6 +691,12 @@ int main(int, char *[]) {
     }
     std::cout << "Loaded " << food_sprites.size() << " food sprites\n";
 
+    // Cache GL texture handles (avoids per-frame nvglImageHandleGL2 calls)
+    std::vector<GLuint> food_textures(food_sprites.size());
+    for (int i = 0; i < (int)food_sprites.size(); i++) {
+        food_textures[i] = nvglImageHandleGL2(vg, food_sprites[i]);
+    }
+
     // Load badge images for the selection UI
     std::vector<int> badge_sprites;
     for (const auto& name : food_names) {
@@ -711,7 +749,7 @@ int main(int, char *[]) {
     std::uniform_int_distribution<> sprite_dist(0, food_sprites.size() - 1);
     std::uniform_real_distribution<> scale_dist(0.5, 1.5);
 
-    for (int i = 0; i < 50; ++i) {
+    for (int i = 0; i < 1000; ++i) {
         // Give each entity a unique name for proper state history tracking
         std::string entity_name = "Entity_" + std::to_string(i);
         auto entity = ecs.entity(entity_name.c_str());
@@ -825,6 +863,7 @@ int main(int, char *[]) {
     // Movement system with bouncing
     auto movementSystem = ecs.system<Position, Velocity, RenderColor>()
         .each([&ecs](flecs::iter& it, size_t i, Position& pos, Velocity& vel, RenderColor& color) {
+            ZoneScopedN("Movement");
             float dt = it.delta_system_time();
 
             pos.x += vel.x * dt;
@@ -847,6 +886,7 @@ int main(int, char *[]) {
     // Health decay system - gradually reduce health over time
     auto healthDecaySystem = ecs.system<Health>()
         .each([&ecs](flecs::iter& it, size_t i, Health& health) {
+            ZoneScopedN("HealthDecay");
             float dt = it.delta_system_time();
             health.value -= 5.0f * dt;  // Lose 5 health per second
             health.value = std::max(0.0f, health.value);
@@ -856,6 +896,7 @@ int main(int, char *[]) {
     // Color update system - transition from green → yellow → red based on health
     auto colorUpdateSystem = ecs.system<Health, RenderColor>()
         .each([&ecs](flecs::iter& it, size_t i, Health& health, RenderColor& color) {
+            ZoneScopedN("ColorUpdate");
             float health_ratio = health.value / health.max_value;
 
             uint8_t r, g, b;
@@ -880,44 +921,104 @@ int main(int, char *[]) {
             }
         });
 
-    // Proximity relationship system - connect nearby entities
-    const float proximity_threshold = 60.0f;  // Distance threshold for relationships
+    // Spatial hash grid for proximity detection
+    const float proximity_threshold = 60.0f;
+    const float cell_size = proximity_threshold;
+    const int grid_cols = (int)std::ceil(1200.0f / cell_size);
+    const int grid_rows = (int)std::ceil(450.0f / cell_size);
+    std::vector<std::vector<std::pair<flecs::entity_t, Position>>> grid(grid_cols * grid_rows);
+
+    // Track active NearBy pairs ourselves to avoid expensive e1.each() scans
+    struct PairHash {
+        size_t operator()(std::pair<flecs::entity_t, flecs::entity_t> p) const {
+            return std::hash<uint64_t>()(p.first) ^ (std::hash<uint64_t>()(p.second) << 32);
+        }
+    };
+    std::unordered_set<std::pair<flecs::entity_t, flecs::entity_t>, PairHash> active_pairs;
+    std::unordered_map<flecs::entity_t, Position> pos_lookup;
+
+    // Proximity relationship system using spatial hash grid
     auto proximitySystem = ecs.system<Position>()
-        .each([&ecs, &NearBy, proximity_threshold](flecs::iter& it, size_t i, Position& pos1) {
-            flecs::entity e1 = it.entity(i);
+        .run([&](flecs::iter& it) {
+            ZoneScopedN("Proximity");
+            double threshold_sq = proximity_threshold * proximity_threshold;
 
-            // Skip if entity is not alive
-            if (!e1.is_alive()) return;
+            // Build grid and position lookup
+            for (auto& cell : grid) cell.clear();
+            pos_lookup.clear();
+            {
+                ZoneScopedN("Proximity Grid Build");
+                auto q = ecs.query<Position>();
+                q.each([&](flecs::entity e, Position& pos) {
+                    int cx = std::clamp((int)(pos.x / cell_size), 0, grid_cols - 1);
+                    int cy = std::clamp((int)(pos.y / cell_size), 0, grid_rows - 1);
+                    grid[cy * grid_cols + cx].push_back({e.id(), pos});
+                    pos_lookup[e.id()] = pos;
+                });
+            }
 
-            // Check distance to all other entities with Position
-            auto q = ecs.query<Position>();
-            q.each([&](flecs::entity e2, Position& pos2) {
-                // Skip self
-                if (e1 == e2) return;
+            // Find which pairs are currently close via grid
+            std::unordered_set<std::pair<flecs::entity_t, flecs::entity_t>, PairHash> close_pairs;
+            {
+                ZoneScopedN("Proximity Grid Query");
+                for (int cy = 0; cy < grid_rows; cy++) {
+                    for (int cx = 0; cx < grid_cols; cx++) {
+                        auto& cell = grid[cy * grid_cols + cx];
+                        if (cell.empty()) continue;
 
-                // Skip if entity is not alive
-                if (!e2.is_alive()) return;
+                        for (int ny = std::max(0, cy - 1); ny <= std::min(grid_rows - 1, cy + 1); ny++) {
+                            for (int nx = std::max(0, cx - 1); nx <= std::min(grid_cols - 1, cx + 1); nx++) {
+                                auto& neighbor_cell = grid[ny * grid_cols + nx];
 
-                // Calculate distance
-                double dx = pos1.x - pos2.x;
-                double dy = pos1.y - pos2.y;
-                double dist = std::sqrt(dx * dx + dy * dy);
-
-                // Check if relationship should exist (with safety check)
-                bool has_relationship = e1.is_alive() && e2.is_alive() && e1.has(NearBy, e2);
-
-                if (dist < proximity_threshold && !has_relationship) {
-                    // Add relationship (only if both entities are alive)
-                    if (e1.is_alive() && e2.is_alive()) {
-                        e1.add(NearBy, e2);
-                    }
-                } else if (dist >= proximity_threshold && has_relationship) {
-                    // Remove relationship (only if both entities are alive)
-                    if (e1.is_alive() && e2.is_alive()) {
-                        e1.remove(NearBy, e2);
+                                for (auto& [id1, pos1] : cell) {
+                                    for (auto& [id2, pos2] : neighbor_cell) {
+                                        if (id1 >= id2) continue;
+                                        double dx = pos1.x - pos2.x;
+                                        double dy = pos1.y - pos2.y;
+                                        if (dx * dx + dy * dy < threshold_sq) {
+                                            close_pairs.insert({id1, id2});
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-            });
+            }
+
+            // Diff against active_pairs: add new, remove stale
+            {
+                ZoneScopedN("Proximity Diff");
+                ecs.defer_begin();
+
+                // Remove pairs no longer close
+                for (auto it = active_pairs.begin(); it != active_pairs.end(); ) {
+                    if (close_pairs.count(*it) == 0) {
+                        flecs::entity e1(ecs.get_world(), it->first);
+                        flecs::entity e2(ecs.get_world(), it->second);
+                        if (e1.is_alive() && e2.is_alive()) {
+                            e1.remove(NearBy, e2);
+                        }
+                        it = active_pairs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+
+                // Add newly close pairs
+                for (auto& pair : close_pairs) {
+                    if (active_pairs.count(pair) == 0) {
+                        flecs::entity e1(ecs.get_world(), pair.first);
+                        flecs::entity e2(ecs.get_world(), pair.second);
+                        if (e1.is_alive() && e2.is_alive()) {
+                            e1.add(NearBy, e2);
+                            active_pairs.insert(pair);
+                        }
+                    }
+                }
+
+                ecs.defer_end();
+            }
         });
 
     // Capture initial state
@@ -950,6 +1051,13 @@ int main(int, char *[]) {
     // Playback control
     double playback_timer = 0.0;
     double playback_speed = 1.0 / 60.0;  // Play at 60 FPS
+
+    // Pre-built queries for rendering (avoids per-frame query creation)
+    auto nearby_render_q = ecs.query_builder<Position>()
+        .with(NearBy, flecs::Wildcard)
+        .build();
+    auto sprite_render_q = ecs.query_builder<Position, RenderColor, FoodSprite>()
+        .build();
 
     // Entity lifecycle tracking
     int next_entity_id = 50;  // Start after initial 50 entities
@@ -1020,6 +1128,7 @@ int main(int, char *[]) {
 
         // Step through resimulation if running
         if (resim_state.is_running) {
+            ZoneScopedN("Resimulation");
             step_resimulation();
         }
 
@@ -1044,9 +1153,8 @@ int main(int, char *[]) {
             // Step forward one frame
             if (!tl_state.is_recording && tl_state.current_frame < tl_state.total_frames) {
                 tl_state.is_playing = false;
-                int target_frame = tl_state.current_frame + 1;
-                history.roll_forward(target_frame);
-                tl_state.current_frame = target_frame;
+                history.step_forward();
+                tl_state.current_frame++;
             }
         }
         was_right_pressed = (right_key == GLFW_PRESS);
@@ -1067,9 +1175,8 @@ int main(int, char *[]) {
 
             while (playback_timer >= playback_speed && tl_state.current_frame < tl_state.total_frames) {
                 playback_timer -= playback_speed;
-                int target_frame = tl_state.current_frame + 1;
-                history.roll_forward(target_frame);
-                tl_state.current_frame = target_frame;
+                history.step_forward();
+                tl_state.current_frame++;
             }
 
             // Stop at end of timeline
@@ -1082,6 +1189,7 @@ int main(int, char *[]) {
 
         // Recording phase
         if (tl_state.is_recording && elapsed < record_time) {
+            ZoneScopedN("Recording");
             // Dynamic entity destruction - destroy entities when health reaches 0
             // Do this BEFORE ecs.progress() to avoid systems accessing dying entities
             frames_since_destroy++;
@@ -1138,7 +1246,8 @@ int main(int, char *[]) {
             }
 
             // Now run the simulation frame
-            ecs.progress(1.0f/60.0f);
+            { ZoneScopedN("ECS Progress");
+            ecs.progress(1.0f/60.0f); }
 
             // Capture state after everything is done
             history.capture_state();
@@ -1154,69 +1263,163 @@ int main(int, char *[]) {
         }
 
         // Rendering
+        { ZoneScopedN("Render");
         glViewport(0, 0, fb_width, fb_height);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-        float pixel_ratio = (float)fb_width / (float)window_width;
-        nvgBeginFrame(vg, window_width, window_height, pixel_ratio);
+        // --- Batched GL rendering (before NanoVG frame) ---
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, window_width, window_height, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
 
-        // Render relationship lines first (behind sprites)
-        nvgStrokeWidth(vg, 1.5f);
-        nvgStrokeColor(vg, nvgRGBA(100, 100, 255, 128));  // Semi-transparent blue
-        auto pos_query = ecs.query<Position>();
-        pos_query.each([&](flecs::entity e1, Position& pos1) {
-            // Find all entities this one has NearBy relationships with
-            e1.each([&](flecs::id rel_id) {
-                if (rel_id.is_pair() && rel_id.first() == NearBy) {
-                    // Get the target entity
-                    flecs::entity e2 = rel_id.second();
-                    if (e2.is_alive() && e2.has<Position>()) {
-                        const Position pos2 = e2.get<Position>();
-                        // Draw line between the two entities
-                        nvgBeginPath(vg);
-                        nvgMoveTo(vg, pos1.x, pos1.y);
-                        nvgLineTo(vg, pos2.x, pos2.y);
-                        nvgStroke(vg);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+        // Single pass: build sprite vertices + flat position table for relationship lookups
+        struct SpriteVertex { float x, y, u, v, r, g, b, a; };
+        static std::vector<std::vector<SpriteVertex>> sprite_batches;
+        static std::vector<float> pos_flat;  // flat [x,y] indexed by entity_id
+        static size_t pos_flat_size = 0;
+
+        { ZoneScopedN("Render Collect");
+        int num_types = (int)food_sprites.size();
+        if ((int)sprite_batches.size() != num_types) sprite_batches.resize(num_types);
+        for (auto& b : sprite_batches) b.clear();
+
+        // Ensure flat position array is large enough
+        // Track max entity id seen to size the array
+        size_t max_id = pos_flat_size;
+        constexpr float sprite_size = 24.0f;
+        constexpr float half = sprite_size / 2.0f;
+
+        sprite_render_q.run([&](flecs::iter& it) {
+            while (it.next()) {
+                auto positions = it.field<Position>(0);
+                auto colors = it.field<RenderColor>(1);
+                auto sprites = it.field<FoodSprite>(2);
+                for (auto i : it) {
+                    flecs::entity_t eid = it.entity(i).id();
+                    // Grow flat position array if needed
+                    if (eid >= max_id) {
+                        max_id = eid + 1;
                     }
+
+                    int idx = sprites[i].sprite_index;
+                    if (idx < 0 || idx >= num_types) continue;
+                    auto& batch = sprite_batches[idx];
+
+                    float cr = ((colors[i].color >> 24) & 0xFF) * (1.0f/255.0f);
+                    float cg = ((colors[i].color >> 16) & 0xFF) * (1.0f/255.0f);
+                    float cb = ((colors[i].color >> 8)  & 0xFF) * (1.0f/255.0f);
+
+                    float x0 = (float)positions[i].x - half;
+                    float y0 = (float)positions[i].y - half;
+                    float x1 = x0 + sprite_size;
+                    float y1 = y0 + sprite_size;
+
+                    batch.push_back({x0, y0, 0, 0, cr, cg, cb, 1});
+                    batch.push_back({x1, y0, 1, 0, cr, cg, cb, 1});
+                    batch.push_back({x1, y1, 1, 1, cr, cg, cb, 1});
+                    batch.push_back({x0, y0, 0, 0, cr, cg, cb, 1});
+                    batch.push_back({x1, y1, 1, 1, cr, cg, cb, 1});
+                    batch.push_back({x0, y1, 0, 1, cr, cg, cb, 1});
                 }
-            });
-        });
-
-        // Render entities as food sprites
-        auto q = ecs.query<Position, RenderColor, FoodSprite>();
-        q.each([&](flecs::entity e, Position& pos, RenderColor& color, FoodSprite& sprite) {
-            if (sprite.sprite_index >= 0 && sprite.sprite_index < food_sprites.size()) {
-                int img = food_sprites[sprite.sprite_index];
-                int img_w, img_h;
-                nvgImageSize(vg, img, &img_w, &img_h);
-
-                // Scale the sprite to fixed 24x24 size
-                float sprite_size = 24.0f;
-                float scale_w = sprite_size / img_w;
-                float scale_h = sprite_size / img_h;
-
-                // Apply health-based tint color
-                uint8_t r = (color.color >> 24) & 0xFF;
-                uint8_t g = (color.color >> 16) & 0xFF;
-                uint8_t b = (color.color >> 8) & 0xFF;
-
-                nvgSave(vg);
-                nvgTranslate(vg, pos.x - sprite_size/2, pos.y - sprite_size/2);
-                nvgScale(vg, scale_w, scale_h);
-
-                NVGpaint imgPaint = nvgImagePattern(vg, 0, 0, img_w, img_h, 0, img, 1.0f);
-                // Tint the sprite based on health
-                imgPaint.innerColor = nvgRGBA(r, g, b, 255);
-
-                nvgBeginPath(vg);
-                nvgRect(vg, 0, 0, img_w, img_h);
-                nvgFillPaint(vg, imgPaint);
-                nvgFill(vg);
-
-                nvgRestore(vg);
             }
         });
+
+        // Resize and fill flat position array (second quick pass over same cached data)
+        if (max_id > pos_flat_size) {
+            pos_flat.resize(max_id * 2, 0.0f);
+            pos_flat_size = max_id;
+        }
+        // Use C API for fastest position iteration (no archetype filtering overhead)
+        {
+            ecs_query_desc_t desc = {};
+            desc.terms[0].id = ecs.component<Position>().id();
+            ecs_query_t* pq = ecs_query_init(ecs.c_ptr(), &desc);
+            ecs_iter_t pit = ecs_query_iter(ecs.c_ptr(), pq);
+            while (ecs_query_next(&pit)) {
+                Position* p = (Position*)ecs_field(&pit, Position, 0);
+                for (int j = 0; j < pit.count; j++) {
+                    flecs::entity_t eid = pit.entities[j];
+                    if (eid < pos_flat_size) {
+                        pos_flat[eid * 2]     = (float)p[j].x;
+                        pos_flat[eid * 2 + 1] = (float)p[j].y;
+                    }
+                }
+            }
+            ecs_query_fini(pq);
+        }
+        } // Render Collect zone
+
+        // Relationship lines: iterate NearBy pairs, O(1) position lookup from flat array
+        { ZoneScopedN("Render Relationships");
+        static std::vector<float> line_verts;
+        line_verts.clear();
+
+        nearby_render_q.run([&](flecs::iter& it) {
+            while (it.next()) {
+                flecs::entity_t tgt_id = it.id(1).second().id();
+                if (tgt_id >= pos_flat_size) continue;
+                float tx = pos_flat[tgt_id * 2];
+                float ty = pos_flat[tgt_id * 2 + 1];
+                for (auto i : it) {
+                    flecs::entity_t src_id = it.entity(i).id();
+                    if (src_id >= pos_flat_size) continue;
+                    line_verts.push_back(pos_flat[src_id * 2]);
+                    line_verts.push_back(pos_flat[src_id * 2 + 1]);
+                    line_verts.push_back(tx);
+                    line_verts.push_back(ty);
+                }
+            }
+        });
+
+        if (!line_verts.empty()) {
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glVertexPointer(2, GL_FLOAT, 0, line_verts.data());
+            glColor4f(0.39f, 0.39f, 1.0f, 0.5f);
+            glLineWidth(1.5f);
+            glDrawArrays(GL_LINES, 0, (GLsizei)(line_verts.size() / 2));
+            glDisableClientState(GL_VERTEX_ARRAY);
+        }
+        } // Render Relationships zone
+
+        // Sprite draw: one glDrawArrays per texture type
+        { ZoneScopedN("Render Sprites");
+        glEnable(GL_TEXTURE_2D);
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+        glEnableClientState(GL_COLOR_ARRAY);
+
+        for (int t = 0; t < (int)food_textures.size(); t++) {
+            auto& batch = sprite_batches[t];
+            if (batch.empty()) continue;
+            glBindTexture(GL_TEXTURE_2D, food_textures[t]);
+            glVertexPointer(2, GL_FLOAT, sizeof(SpriteVertex), &batch[0].x);
+            glTexCoordPointer(2, GL_FLOAT, sizeof(SpriteVertex), &batch[0].u);
+            glColorPointer(4, GL_FLOAT, sizeof(SpriteVertex), &batch[0].r);
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)batch.size());
+        }
+
+        glDisableClientState(GL_COLOR_ARRAY);
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+        glDisableClientState(GL_VERTEX_ARRAY);
+        glDisable(GL_TEXTURE_2D);
+        } // Render Sprites zone
+
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+        glPopMatrix();
+
+        // --- NanoVG UI rendering ---
+        float pixel_ratio = (float)fb_width / (float)window_width;
+        nvgBeginFrame(vg, window_width, window_height, pixel_ratio);
 
         // Draw timeline
         draw_timeline(vg, window_width, window_height, tl_state, history, retroactive_query);
@@ -1230,6 +1433,7 @@ int main(int, char *[]) {
         draw_resimulation_scanline(vg, window_width, tl_state, resim_state, food_names);
 
         nvgEndFrame(vg);
+        } // Render zone
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -1238,6 +1442,8 @@ int main(int, char *[]) {
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
             glfwSetWindowShouldClose(window, true);
         }
+
+        FrameMark;
     }
 
     // Disable recording before cleanup

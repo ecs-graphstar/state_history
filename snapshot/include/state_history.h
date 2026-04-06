@@ -15,6 +15,14 @@
 #include <memory>
 #include <spdlog/spdlog.h>
 
+#ifdef TRACY_ENABLE
+#include <tracy/Tracy.hpp>
+#else
+#define ZoneScoped
+#define ZoneScopedN(x)
+#define FrameMark
+#endif
+
 namespace state_history_detail {
     inline bool init_logging() {
         if (spdlog::default_logger()->level() == spdlog::level::info) {
@@ -672,6 +680,7 @@ public:
     }
 
     std::vector<uint8_t> compress_buffer(const std::vector<uint8_t>& input) {
+        ZoneScopedN("compress_buffer");
         if (input.empty()) return input;
 
         size_t const dst_capacity = ZSTD_compressBound(input.size());
@@ -814,6 +823,7 @@ public:
     }
 
     void capture_state() {
+        ZoneScopedN("capture_state");
         Snapshot snapshot;
         snapshot.frame = current_frame;
         snapshot.set_keyframe(current_frame % keyframe_interval == 0);
@@ -965,6 +975,7 @@ public:
     void capture_all_components(Snapshot& snapshot,
                                std::vector<ComponentHeader>& headers,
                                std::vector<uint8_t>& data_section) {
+        ZoneScopedN("capture_all_components");
         // Capture all tracked components using C API
         for (size_t i = 0; i < tracked_component_ids.size(); ++i) {
             ecs_entity_t comp_id = tracked_component_ids[i];
@@ -1144,6 +1155,7 @@ public:
     void capture_changed_components(Snapshot& snapshot,
                                    std::vector<ComponentHeader>& headers,
                                    std::vector<uint8_t>& data_section) {
+        ZoneScopedN("capture_changed_components");
         // Process all component events that occurred this frame
         for (const auto& event : frame_events) {
             size_t size = registry.get_size(event.component);
@@ -1279,6 +1291,7 @@ public:
     }
 
     void rollback_to(size_t target_frame) {
+        ZoneScopedN("rollback_to");
         if (target_frame >= snapshots.size()) {
             spdlog::warn("Cannot rollback to frame {}", target_frame);
             return;
@@ -1322,6 +1335,7 @@ public:
     // TODO: Consider only rolling forward a subset of entities/components/relationship types
     // to accelerate retroactive queries
     void roll_forward(size_t target_frame) {
+        ZoneScopedN("roll_forward");
         if (target_frame >= snapshots.size()) {
             spdlog::warn("Cannot roll forward to frame {} (only {} frames exist)", target_frame, snapshots.size());
             return;
@@ -1387,6 +1401,7 @@ public:
     // full clear+restore for correctness (only 1/keyframe_interval of frames).
     // Returns false when there are no more frames.
     bool step_forward() {
+        ZoneScopedN("step_forward");
         if (current_frame >= snapshots.size()) return false;
 
         recording_enabled = false;
@@ -1412,6 +1427,7 @@ public:
     }
 
     void restore_entities_from_keyframe(size_t frame_idx) {
+        ZoneScopedN("restore_entities_from_keyframe");
         if (!snapshots[frame_idx].is_keyframe()) {
             spdlog::error("Frame {} is not a keyframe", frame_idx);
             return;
@@ -1472,6 +1488,7 @@ public:
     }
 
     void clear_all_components() {
+        ZoneScopedN("clear_all_components");
         // Remove all tracked components from all entities using C API
         for (ecs_entity_t comp_id : tracked_component_ids) {
             ecs_defer_begin(world->c_ptr());
@@ -1535,6 +1552,7 @@ public:
     }
 
     void clear_all_relationships() {
+        ZoneScopedN("clear_all_relationships");
         // Remove all tracked relationships only from tracked entities
         world->defer_begin();
         for (flecs::entity_t entity_id : tracked_entities) {
@@ -1571,6 +1589,7 @@ public:
     }
 
     void restore_keyframe(size_t frame_idx) {
+        ZoneScopedN("restore_keyframe");
         if (!snapshots[frame_idx].is_keyframe()) {
             spdlog::error("Frame {} is not a keyframe", frame_idx);
             return;
@@ -1677,6 +1696,7 @@ public:
     }
 
     void apply_snapshot_forward(Snapshot& snapshot) {
+        ZoneScopedN("apply_snapshot_forward");
         // Check total compressed size to decide if parallelization is worth it
         auto comp_info = snapshot.get_component_info();
         auto ent_info = snapshot.get_entity_info();

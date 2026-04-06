@@ -3,6 +3,7 @@
 
 void register_all_components(StateHistory& history) {
     history.register_component<Position>();
+    history.register_component<Mass>();
     history.register_component<Velocity>();
     history.register_component<Health>();
     history.register_component<Damage>();
@@ -15,6 +16,7 @@ void register_all_components(StateHistory& history) {
 
 void register_all_components(TimelineTree& tree) {
     tree.register_component<Position>();
+    tree.register_component<Mass>();
     tree.register_component<Velocity>();
     tree.register_component<Health>();
     tree.register_component<Damage>();

@@ -25,9 +25,13 @@ add_subdirectory("../project_template_ui/deps/glfw" "${CMAKE_BINARY_DIR}/glfw")
 add_library(glad STATIC "../project_template_ui/deps/glad/src/glad.c")
 target_include_directories(glad PUBLIC "../project_template_ui/deps/glad/include")
 
+add_subdirectory("../project_template_ui/deps/tracy" "${CMAKE_BINARY_DIR}/tracy")
+
 add_library(nanovg STATIC "../project_template_ui/deps/nanovg/src/nanovg.c")
 target_include_directories(nanovg PUBLIC "../project_template_ui/deps/nanovg/src")
 target_compile_definitions(nanovg PUBLIC NANOVG_GL2_IMPLEMENTATION)
+
+add_definitions(-DTRACY_ENABLE -DTRACY_NO_EXIT)
 
 # --- Targets ---
 file(GLOB_RECURSE SOURCES "src/*.cpp")
@@ -40,6 +44,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "../project_template_ui/deps/glfw/include"
     "../project_template_ui/deps/nanovg/src"
     "../project_template_ui/deps/glad/include"
+    "../project_template_ui/deps/tracy/public"
     "../deps/zstd/lib"
     "../deps/spdlog/include"
 )
@@ -51,6 +56,7 @@ target_link_libraries(${PROJECT_NAME}
     glad
     nanovg
     libzstd_static
+    Tracy::TracyClient
     ${CMAKE_DL_LIBS}
 )
 

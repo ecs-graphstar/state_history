@@ -28,6 +28,7 @@ set(TEST_TARGETS
     test_relationships
     test_step_forward
     test_track_entity_order
+    stochastic_world_explorer
 )
 
 # Main Library

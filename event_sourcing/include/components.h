@@ -9,6 +9,11 @@ struct Position {
     double x, y;
 };
 
+struct Mass
+{
+    double kg;
+};
+
 struct Velocity {
     double x, y;
 };
