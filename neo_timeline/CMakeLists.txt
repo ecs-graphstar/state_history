@@ -15,7 +15,7 @@ set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
 add_subdirectory("../deps/zstd/build/cmake" "${CMAKE_BINARY_DIR}/zstd")
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-add_subdirectory("../project_template_ui/deps/flecs" "${CMAKE_BINARY_DIR}/flecs")
+add_subdirectory("../tradewinds/deps/flecs" "${CMAKE_BINARY_DIR}/flecs")
 
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -40,7 +40,7 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 target_include_directories(${PROJECT_NAME} PRIVATE
     "include"
     "../snapshot/include"
-    "../project_template_ui/deps/flecs/include"
+    "../tradewinds/deps/flecs/include"
     "../project_template_ui/deps/glfw/include"
     "../project_template_ui/deps/nanovg/src"
     "../project_template_ui/deps/glad/include"

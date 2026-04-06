@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.18)
 project(project)
 
 set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-add_subdirectory("../project_template_ui/deps/flecs" "deps/flecs")
+add_subdirectory("../tradewinds/deps/flecs" "deps/flecs")
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
@@ -15,7 +15,7 @@ target_include_directories(project_settings INTERFACE
     "src"
     "include"
     "../snapshot/include"
-    "../project_template_ui/deps/flecs/include"
+    "../tradewinds/deps/flecs/include"
     "../deps/zstd/lib"
     "../deps/spdlog/include"
 )
